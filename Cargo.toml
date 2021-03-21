@@ -1,0 +1,21 @@
+# SPDX-License-Identifier: LGPL-2.1-or-later
+# See Notices.txt for copyright information
+[package]
+name = "riscv-jit-emulator"
+version = "0.1.0"
+authors = ["Jacob Lifshay <programmerjake@gmail.com>"]
+edition = "2018"
+license = "LGPL-2.1-or-later"
+
+[dependencies]
+
+[dependencies.riscv-jit-emulator-proc-macro]
+path = "riscv-jit-emulator-proc-macro"
+version = "=0.1.0"
+
+[workspace]
+members = [
+    ".",
+    "riscv-jit-emulator-proc-macro",
+    "riscv-jit-emulator-instruction-table-parser",
+]

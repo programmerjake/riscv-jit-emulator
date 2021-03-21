@@ -1,0 +1,12 @@
+# SPDX-License-Identifier: LGPL-2.1-or-later
+# See Notices.txt for copyright information
+[package]
+name = "riscv-jit-emulator-instruction-table-parser"
+version = "0.1.0"
+authors = ["Jacob Lifshay <programmerjake@gmail.com>"]
+edition = "2018"
+license = "LGPL-2.1-or-later"
+
+[dependencies]
+once_cell = "1.2"
+unicode-width = "0.1.7"
