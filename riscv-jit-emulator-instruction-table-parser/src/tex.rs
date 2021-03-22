@@ -34,11 +34,7 @@ peg::parser! {
             / t:macro_() { Token::Macro(t) }
             / t:full_comment() { Token::FullComment(t) }
             / t:group() { Token::Group(t) }
-            /* TODO:
-            / math_shift eq:(!math_shift t:math_token { return t; })+ math_shift {
-                return createNode("inlinemath", { content: eq });
-            }
-            */
+            / t:dollar_inline_math() { Token::DollarInlineMath(t) }
             / t:alignment_tab() { Token::AlignmentTab(t) }
             / t:par_break() { Token::ParBreak(t) }
             / t:macro_parameter() { Token::MacroParameter(t) }
@@ -101,7 +97,7 @@ peg::parser! {
 
         rule number() -> Number =
             pos:pos() content:$(
-                digit()+ "." digit()*
+                digit()+ ("." digit()*)?
                 / "." digit()+
             ) { Number { pos, content: content.into() } }
 
@@ -109,7 +105,7 @@ peg::parser! {
             v:verb() { SpecialMacro::Verb(v) }
             / v:verbatim_environment() { SpecialMacro::VerbatimEnvironment(v) }
             / v:display_math() { SpecialMacro::DisplayMath(v) }
-            / v:inline_math() { SpecialMacro::InlineMath(v) }
+            / v:parenthesized_inline_math() { SpecialMacro::ParenthesizedInlineMath(v) }
             / v:math_environment() { SpecialMacro::MathEnvironment(v) }
             / v:environment() { SpecialMacro::Environment(v) }
 
@@ -202,11 +198,16 @@ peg::parser! {
             math_shift()
             math_shift() { DisplayMath { pos, content } }
 
-        rule inline_math() -> InlineMath =
+        rule parenthesized_inline_math() -> ParenthesizedInlineMath =
             // inline math with \(...\)
             begin:begin_inline_math()
             content:(!end_inline_math() t:math_token() { t })*
-            end:end_inline_math() { InlineMath { begin, content, end } }
+            end:end_inline_math() { ParenthesizedInlineMath { begin, content, end } }
+
+        rule dollar_inline_math() -> DollarInlineMath =
+            begin:math_shift()
+            content:(!math_shift() t:math_token() { t })+
+            end:math_shift() { DollarInlineMath { begin, content, end } }
 
         rule macro_() -> Macro =
             escape:escape() name:macro_name() { Macro { escape, name } }

@@ -2,10 +2,9 @@
 // See Notices.txt for copyright information
 
 use crate::tex::ast;
-use ast::Pos;
-use peg::str::LineCol;
-use peg::Parse;
-use std::{error::Error, fmt};
+use ast::GetPos;
+use peg::{str::LineCol, Parse};
+use std::{borrow::Cow, error::Error, fmt};
 
 #[derive(Debug)]
 pub struct ParseError {
@@ -49,11 +48,11 @@ macro_rules! err_if {
     };
 }
 
-macro_rules! unwrap_or_continue {
-    ($opt:expr) => {
+macro_rules! unwrap_or {
+    ($opt:expr, $($none:tt)+) => {
         match $opt {
             Some(v) => v,
-            None => continue,
+            None => { $($none)+ }
         }
     };
 }
@@ -71,41 +70,135 @@ impl<'a> Parser<'a> {
             message,
         }
     }
-    fn err_pos(&self, pos: ast::Pos, message: String) -> ParseError {
-        self.err_line_col(self.input.position_repr(pos.byte_index), message)
+    fn err_pos(&self, pos: impl ast::GetPos, message: String) -> ParseError {
+        self.err_line_col(self.input.position_repr(pos.pos().byte_index), message)
+    }
+    fn expect_environment<'b>(
+        &self,
+        environment: &'b ast::Environment,
+        name: &str,
+    ) -> Result<&'b ast::Environment> {
+        if environment.name.content == name {
+            Ok(environment)
+        } else {
+            err!(self, environment, "expected `\\begin{{{}}}`", name);
+        }
+    }
+    fn parse_tabular_column_definitions(
+        &self,
+        columns_group: &ast::Group,
+    ) -> Result<Vec<ColumnDefinition>> {
+        let mut tokens = ast::SplitCharTokensIter::new(&columns_group.tokens).peekable();
+        let mut retval = Vec::new();
+        loop {
+            let kind = match unwrap_or!(tokens.next().as_deref(), break Ok(retval)) {
+                ast::Token::CharTokens(c) if c.content == "l" => {
+                    ColumnKind::LeftJustified { keyword_pos: c.pos }
+                }
+                ast::Token::CharTokens(c) if c.content == "p" => {
+                    let width = tokens.next().map(Cow::into_owned);
+                    let width_pos = width.as_ref().map(GetPos::pos);
+                    let width = unwrap_or!(
+                        width.and_then(|t| t.into_group()),
+                        err!(
+                            self,
+                            width_pos.unwrap_or(columns_group.end.pos()),
+                            "expected `{{`"
+                        )
+                    );
+                    ColumnKind::ParagraphTop {
+                        keyword_pos: c.pos,
+                        width,
+                    }
+                }
+                token => err!(self, token, "expected `tabular` column definition"),
+            };
+            retval.push(ColumnDefinition { kind });
+        }
+    }
+    fn parse_tabular_env<'b>(&self, tabular_env: &'b ast::Environment) -> Result<()> {
+        let mut tabular_body = tabular_env.body.iter();
+        let mut first_token = tabular_body.next();
+        match first_token.and_then(|t| Some(&*t.char_tokens()?.content)) {
+            Some(pos) if matches!(pos, "t" | "b" | "c") => {
+                first_token = None;
+            }
+            _ => {}
+        }
+        let column_definitions = self.parse_tabular_column_definitions(unwrap_or!(
+            first_token
+                .or_else(|| tabular_body.next())
+                .and_then(ast::Token::group),
+            err!(
+                self,
+                tabular_env.body_pos(),
+                "expected `tabular` column definitions"
+            )
+        ))?;
+        dbg!(&column_definitions);
+        let mut column_index = 0;
+        let mut columns = Vec::new();
+        let mut cell: Option<()> = None; // TODO: use correct cell type
+        while let Some(token) = tabular_body.next() {
+            match token {
+                ast::Token::AlignmentTab(alignment_tab) => {
+                    column_index += 1;
+                    err_if!(
+                        column_index >= column_definitions.len(),
+                        self,
+                        alignment_tab,
+                        "too many alignment tabs for column count"
+                    );
+                    columns.extend(cell.take());
+                }
+                ast::Token::Macro(macro_) if macro_.name.content == "\\" => {
+                    todo!("start new row")
+                }
+                ast::Token::Whitespace(_) => {}
+                _ => todo!("token={:?}", token),
+            }
+        }
+        dbg!(&tabular_body);
+        todo!()
     }
     fn parse_instruction_set(&self, document: &ast::Document) -> Result<InstructionSet> {
-        for token in document
-            .content
-            .iter()
-            .find_map(ast::Token::environment)
-            .into_iter()
-            .flat_map(|v| &v.body)
-        {
-            todo!();
-            unwrap_or_continue!(token.environment());
-            if let ast::Token::SpecialMacro(ast::SpecialMacro::Environment(env)) = token {
-                err_if!(
-                    env.name.content != "table",
-                    self,
-                    env.name.pos,
-                    "expected `table`"
-                );
-                for token in &env.body {
-                    if let ast::Token::SpecialMacro(ast::SpecialMacro::Environment(env)) = token {
-                        err_if!(env.name.content != "small", self, env.name.pos, "");
-                        dbg!(env);
-                        todo!()
+        for table_env in document.content.iter().filter_map(ast::Token::environment) {
+            let table_env = self.expect_environment(table_env, "table")?;
+            for small_env in table_env.body.iter().filter_map(ast::Token::environment) {
+                let small_env = self.expect_environment(small_env, "small")?;
+                for center_env in small_env.body.iter().filter_map(ast::Token::environment) {
+                    let center_env = self.expect_environment(center_env, "center")?;
+                    for tabular_env in center_env.body.iter().filter_map(ast::Token::environment) {
+                        let tabular_env = self.expect_environment(tabular_env, "tabular")?;
+                        let v = self.parse_tabular_env(tabular_env)?;
+                        todo!();
                     }
                 }
             }
         }
-        err!(self, ast::Pos { byte_index: 0 }, "no environment found")
+        err!(self, document, "no environment found")
     }
 }
 
 #[derive(Debug, Clone)]
 pub struct InstructionSet {}
+
+#[derive(Debug, Clone)]
+pub enum ColumnKind {
+    ParagraphTop {
+        keyword_pos: ast::Pos,
+        width: ast::Group,
+    },
+    LeftJustified {
+        keyword_pos: ast::Pos,
+    },
+    // TODO: add rest
+}
+
+#[derive(Debug, Clone)]
+pub struct ColumnDefinition {
+    pub kind: ColumnKind,
+}
 
 pub fn parse(file_name: &str, input: &str) -> Result<InstructionSet> {
     let parser = Parser::new(file_name, input);
