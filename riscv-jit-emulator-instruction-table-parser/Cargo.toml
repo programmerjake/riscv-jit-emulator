@@ -7,6 +7,12 @@ authors = ["Jacob Lifshay <programmerjake@gmail.com>"]
 edition = "2018"
 license = "LGPL-2.1-or-later"
 
+[features]
+trace = ["peg/trace"]
+
 [dependencies]
 once_cell = "1.2"
 unicode-width = "0.1.7"
+peg = "0.6.3"
+serde_json = "1.0"
+serde = { version = "1.0", features = ["derive"] }

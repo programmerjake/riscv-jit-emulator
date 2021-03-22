@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: LGPL-2.1-or-later
 // See Notices.txt for copyright information
 
-use riscv_jit_emulator_instruction_table_parser::{ast, Parser, SourceCode};
+use riscv_jit_emulator_instruction_table_parser::parse;
 use std::fs::read_to_string;
 use syn::{self, LitStr};
 
@@ -13,10 +13,8 @@ pub(crate) fn parse_file(file_path: &LitStr) -> syn::Result<()> {
             format!("failed to read file {:?}: {}", &file_path_string, e),
         )
     })?;
-    let source_code = SourceCode::new(&file_path_string, &input);
-    let document = Parser::new(&source_code)
-        .parse::<ast::Document>()
-        .map_err(|e| syn::Error::new_spanned(file_path, e))?;
+    let document =
+        parse(&file_path_string, &input).map_err(|e| syn::Error::new_spanned(file_path, e))?;
     dbg!(document);
     todo!()
 }
