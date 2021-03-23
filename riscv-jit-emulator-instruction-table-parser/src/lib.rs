@@ -3,4 +3,6 @@
 pub mod ast;
 pub mod tex;
 
+use std::{io, path::Path};
+
 pub use ast::parse;

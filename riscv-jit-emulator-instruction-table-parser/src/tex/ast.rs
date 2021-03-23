@@ -1,8 +1,12 @@
 // SPDX-License-Identifier: LGPL-2.1-or-later
 // See Notices.txt for copyright information
 
+use input_context::InputContext;
+use peg::Parse;
 use serde::Serialize;
-use std::{borrow::Cow, fmt};
+use std::{borrow::Cow, cell::Cell, fmt, mem, str::FromStr, thread_local};
+
+pub mod input_context;
 
 #[derive(Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct Pos {
@@ -52,7 +56,12 @@ impl Serialize for Pos {
 
 impl fmt::Debug for Pos {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "@{}", self.byte_index)
+        Self::get_input_context(|input: Option<InputContext<'_>>| match input {
+            Some(input) if input.input.get(..self.byte_index).is_some() => {
+                write!(f, "@{}", input.input.position_repr(self.byte_index))
+            }
+            _ => write!(f, "@{}", self.byte_index),
+        })
     }
 }
 
@@ -135,6 +144,7 @@ impl_get_pos_simple!(Ignore);
 #[derive(Serialize, Debug, Clone)]
 pub struct AnyChar {
     pub pos: Pos,
+    pub ch: char,
 }
 
 impl_get_pos_simple!(AnyChar);
@@ -142,6 +152,7 @@ impl_get_pos_simple!(AnyChar);
 #[derive(Serialize, Debug, Clone)]
 pub struct Punctuation {
     pub pos: Pos,
+    pub ch: char,
 }
 
 impl_get_pos_simple!(Punctuation);
@@ -619,6 +630,23 @@ impl GetPos for Environment {
 pub struct Number {
     pub pos: Pos,
     pub content: String,
+}
+
+impl Number {
+    pub fn parse<T: FromStr>(&self) -> Result<T, T::Err> {
+        self.content.parse()
+    }
+    pub fn parse_with_err_arg<T: FromStr, E, A, ErrFn: FnOnce(A, Pos, String) -> E>(
+        &self,
+        err_fn_arg: A,
+        err_fn: ErrFn,
+    ) -> Result<T, E>
+    where
+        T::Err: fmt::Display,
+    {
+        self.parse()
+            .map_err(|e: T::Err| err_fn(err_fn_arg, self.pos, e.to_string()))
+    }
 }
 
 impl_get_pos_simple!(Number);

@@ -385,10 +385,10 @@ peg::parser! {
 
         // catcode 12
         rule punctuation() -> Punctuation =
-            pos:pos() [
+            pos:pos() ch:$([
                 '.' | ',' | ';' | ':' | '-' | '*' | '/' | '(' | ')' | '!'
                 | '?' | '=' | '+' | '<' | '>' | '[' | ']'
-            ] { Punctuation { pos } }
+            ]) { Punctuation { pos, ch: ch.chars().next().unwrap() } }
 
         // catcode 14, including the newline
         rule comment_start() -> CommentStart =
@@ -460,7 +460,7 @@ peg::parser! {
             ##is_start_of_line()
 
         rule any_char() -> AnyChar =
-            pos:pos() [_] { AnyChar { pos } }
+            pos:pos() ch:$([_]) { AnyChar { pos, ch: ch.chars().next().unwrap() } }
 
         rule pos() -> Pos =
             p:position!() { Pos::new(p) }

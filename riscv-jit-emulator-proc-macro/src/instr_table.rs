@@ -18,3 +18,21 @@ pub(crate) fn parse_file(file_path: &LitStr) -> syn::Result<()> {
     dbg!(document);
     todo!()
 }
+
+#[cfg(test)]
+mod test {
+    use super::*;
+    use proc_macro2::Span;
+
+    #[test]
+    fn test_parse_instr_table() {
+        parse_file(&LitStr::new(
+            concat!(
+                env!("CARGO_MANIFEST_DIR"),
+                "/../riscv-isa-manual/src/instr-table.tex"
+            ),
+            Span::call_site(),
+        ))
+        .unwrap();
+    }
+}
