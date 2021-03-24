@@ -1621,27 +1621,11 @@ pub fn parse(file_name: &str, input: &str) -> Result<InstructionSet> {
 mod test {
     #[test]
     fn test_parse_instr_table() {
-        super::parse(
-            "instr-table.tex",
-            include_str!(concat!(
-                env!("CARGO_MANIFEST_DIR"),
-                "/../riscv-isa-manual/src/instr-table.tex"
-            )),
-        )
-        .map_err(|e| e.to_string())
-        .unwrap();
+        crate::parse_instr_table();
     }
 
     #[test]
     fn test_parse_rvc_instr_table() {
-        super::parse(
-            "rvc-instr-table.tex",
-            include_str!(concat!(
-                env!("CARGO_MANIFEST_DIR"),
-                "/../riscv-isa-manual/src/rvc-instr-table.tex"
-            )),
-        )
-        .map_err(|e| e.to_string())
-        .unwrap();
+        crate::parse_rvc_instr_table();
     }
 }

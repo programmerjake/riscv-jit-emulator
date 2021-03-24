@@ -2,10 +2,4 @@
 // See Notices.txt for copyright information
 use riscv_jit_emulator_proc_macro::gen_decoder;
 
-// TODO: finish
-// gen_decoder!(
-//     instr_table = concat!(
-//         env!("CARGO_MANIFEST_DIR"),
-//         "/riscv-isa-manual/src/instr-table.tex"
-//     )
-// );
+gen_decoder!();
