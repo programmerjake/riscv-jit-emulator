@@ -2,13 +2,11 @@
 // See Notices.txt for copyright information
 use proc_macro2::TokenStream;
 use quote::quote;
-use riscv_jit_emulator_instruction_table_parser::{ast, parse_instr_table, parse_rvc_instr_table};
+use riscv_instructions::{ast, parse_instr_table, parse_rvc_instr_table};
 use syn::{
     parse::{Parse, ParseStream},
     parse_macro_input,
 };
-
-mod instr_table;
 
 fn parse_instructions() -> impl Iterator<Item = ast::Instruction> {
     parse_instr_table()

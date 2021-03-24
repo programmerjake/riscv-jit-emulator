@@ -6,6 +6,10 @@ version = "0.1.0"
 authors = ["Jacob Lifshay <programmerjake@gmail.com>"]
 edition = "2018"
 license = "LGPL-2.1-or-later"
+repository = "https://github.com/programmerjake/riscv-jit-emulator"
+publish = false
+description = "WIP emulator for riscv that jit-compiles code -- the intention is to run cargo/rustc in a sandbox"
+exclude = ["/.vscode"]
 
 [dependencies]
 
@@ -16,6 +20,7 @@ version = "=0.1.0"
 [workspace]
 members = [
     ".",
+    "tex-parser",
     "riscv-jit-emulator-proc-macro",
-    "riscv-jit-emulator-instruction-table-parser",
+    "riscv-instructions",
 ]

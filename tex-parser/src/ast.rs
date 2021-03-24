@@ -3,8 +3,9 @@
 
 use input_context::InputContext;
 use peg::Parse;
+#[cfg(feature = "serde")]
 use serde::Serialize;
-use std::{borrow::Cow, cell::Cell, fmt, mem, str::FromStr, thread_local};
+use std::{borrow::Cow, fmt, str::FromStr};
 
 pub mod input_context;
 
@@ -45,6 +46,7 @@ macro_rules! impl_get_pos_simple {
     };
 }
 
+#[cfg(feature = "serde")]
 impl Serialize for Pos {
     fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
     where
@@ -71,77 +73,88 @@ impl Pos {
     }
 }
 
-#[derive(Serialize, Debug, Clone)]
+#[cfg_attr(feature = "serde", derive(Serialize))]
+#[derive(Debug, Clone)]
 pub struct Escape {
     pub pos: Pos,
 }
 
 impl_get_pos_simple!(Escape);
 
-#[derive(Serialize, Debug, Clone)]
+#[cfg_attr(feature = "serde", derive(Serialize))]
+#[derive(Debug, Clone)]
 pub struct BeginGroup {
     pub pos: Pos,
 }
 
 impl_get_pos_simple!(BeginGroup);
 
-#[derive(Serialize, Debug, Clone)]
+#[cfg_attr(feature = "serde", derive(Serialize))]
+#[derive(Debug, Clone)]
 pub struct EndGroup {
     pub pos: Pos,
 }
 
 impl_get_pos_simple!(EndGroup);
 
-#[derive(Serialize, Debug, Clone)]
+#[cfg_attr(feature = "serde", derive(Serialize))]
+#[derive(Debug, Clone)]
 pub struct AlignmentTab {
     pub pos: Pos,
 }
 
 impl_get_pos_simple!(AlignmentTab);
 
-#[derive(Serialize, Debug, Clone)]
+#[cfg_attr(feature = "serde", derive(Serialize))]
+#[derive(Debug, Clone)]
 pub struct MacroParameter {
     pub pos: Pos,
 }
 
 impl_get_pos_simple!(MacroParameter);
 
-#[derive(Serialize, Debug, Clone)]
+#[cfg_attr(feature = "serde", derive(Serialize))]
+#[derive(Debug, Clone)]
 pub struct CommentStart {
     pub pos: Pos,
 }
 
 impl_get_pos_simple!(CommentStart);
 
-#[derive(Serialize, Debug, Clone)]
+#[cfg_attr(feature = "serde", derive(Serialize))]
+#[derive(Debug, Clone)]
 pub struct MathShift {
     pub pos: Pos,
 }
 
 impl_get_pos_simple!(MathShift);
 
-#[derive(Serialize, Debug, Clone)]
+#[cfg_attr(feature = "serde", derive(Serialize))]
+#[derive(Debug, Clone)]
 pub struct Superscript {
     pub pos: Pos,
 }
 
 impl_get_pos_simple!(Superscript);
 
-#[derive(Serialize, Debug, Clone)]
+#[cfg_attr(feature = "serde", derive(Serialize))]
+#[derive(Debug, Clone)]
 pub struct Subscript {
     pub pos: Pos,
 }
 
 impl_get_pos_simple!(Subscript);
 
-#[derive(Serialize, Debug, Clone)]
+#[cfg_attr(feature = "serde", derive(Serialize))]
+#[derive(Debug, Clone)]
 pub struct Ignore {
     pub pos: Pos,
 }
 
 impl_get_pos_simple!(Ignore);
 
-#[derive(Serialize, Debug, Clone)]
+#[cfg_attr(feature = "serde", derive(Serialize))]
+#[derive(Debug, Clone)]
 pub struct AnyChar {
     pub pos: Pos,
     pub ch: char,
@@ -149,7 +162,8 @@ pub struct AnyChar {
 
 impl_get_pos_simple!(AnyChar);
 
-#[derive(Serialize, Debug, Clone)]
+#[cfg_attr(feature = "serde", derive(Serialize))]
+#[derive(Debug, Clone)]
 pub struct Punctuation {
     pub pos: Pos,
     pub ch: char,
@@ -157,42 +171,48 @@ pub struct Punctuation {
 
 impl_get_pos_simple!(Punctuation);
 
-#[derive(Serialize, Debug, Clone)]
+#[cfg_attr(feature = "serde", derive(Serialize))]
+#[derive(Debug, Clone)]
 pub struct Space {
     pub pos: Pos,
 }
 
 impl_get_pos_simple!(Space);
 
-#[derive(Serialize, Debug, Clone)]
+#[cfg_attr(feature = "serde", derive(Serialize))]
+#[derive(Debug, Clone)]
 pub struct AsciiAlphabetic {
     pub pos: Pos,
 }
 
 impl_get_pos_simple!(AsciiAlphabetic);
 
-#[derive(Serialize, Debug, Clone)]
+#[cfg_attr(feature = "serde", derive(Serialize))]
+#[derive(Debug, Clone)]
 pub struct AsciiDigit {
     pub pos: Pos,
 }
 
 impl_get_pos_simple!(AsciiDigit);
 
-#[derive(Serialize, Debug, Clone)]
+#[cfg_attr(feature = "serde", derive(Serialize))]
+#[derive(Debug, Clone)]
 pub struct NewLine {
     pub pos: Pos,
 }
 
 impl_get_pos_simple!(NewLine);
 
-#[derive(Serialize, Debug, Clone)]
+#[cfg_attr(feature = "serde", derive(Serialize))]
+#[derive(Debug, Clone)]
 pub struct CharToken {
     pub pos: Pos,
 }
 
 impl_get_pos_simple!(CharToken);
 
-#[derive(Serialize, Debug, Clone)]
+#[cfg_attr(feature = "serde", derive(Serialize))]
+#[derive(Debug, Clone)]
 pub struct CharTokens {
     pub pos: Pos,
     pub content: String,
@@ -216,7 +236,8 @@ impl CharTokens {
 
 impl_get_pos_simple!(CharTokens);
 
-#[derive(Serialize, Debug, Clone)]
+#[cfg_attr(feature = "serde", derive(Serialize))]
+#[derive(Debug, Clone)]
 pub struct Document {
     pub content: Vec<Token>,
 }
@@ -254,8 +275,9 @@ macro_rules! declare_transparent_enum {
             )+
         }
     ) => {
-        #[derive(Serialize, Clone)]
-        #[serde(tag = $tag)]
+        #[cfg_attr(feature = "serde", derive(Serialize))]
+        #[derive(Clone)]
+        #[cfg_attr(feature = "serde", serde(tag = $tag))]
         pub enum $name {
             $($alternative($alternative),)+
         }
@@ -462,7 +484,8 @@ declare_transparent_enum! {
     }
 }
 
-#[derive(Serialize, Debug, Clone)]
+#[cfg_attr(feature = "serde", derive(Serialize))]
+#[derive(Debug, Clone)]
 pub struct Verb {
     pub escape: Escape,
     pub env: String,
@@ -476,7 +499,8 @@ impl GetPos for Verb {
     }
 }
 
-#[derive(Serialize, Debug, Clone)]
+#[cfg_attr(feature = "serde", derive(Serialize))]
+#[derive(Debug, Clone)]
 pub struct ParenthesizedInlineMath {
     pub begin: BeginInlineMath,
     pub content: Vec<MathToken>,
@@ -495,7 +519,8 @@ impl GetPos for ParenthesizedInlineMath {
     }
 }
 
-#[derive(Serialize, Debug, Clone)]
+#[cfg_attr(feature = "serde", derive(Serialize))]
+#[derive(Debug, Clone)]
 pub struct DollarInlineMath {
     pub begin: MathShift,
     pub content: Vec<MathToken>,
@@ -514,7 +539,8 @@ impl GetPos for DollarInlineMath {
     }
 }
 
-#[derive(Serialize, Debug, Clone)]
+#[cfg_attr(feature = "serde", derive(Serialize))]
+#[derive(Debug, Clone)]
 pub struct VerbatimEnvironment {
     pub begin: BeginEnvironment,
     pub name: VerbatimEnvironmentName,
@@ -528,7 +554,8 @@ impl GetPos for VerbatimEnvironment {
     }
 }
 
-#[derive(Serialize, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Debug)]
+#[cfg_attr(feature = "serde", derive(Serialize))]
+#[derive(Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Debug)]
 pub enum VerbatimEnvironmentNameKind {
     VerbatimStar,
     Verbatim,
@@ -538,7 +565,8 @@ pub enum VerbatimEnvironmentNameKind {
     ListListing,
 }
 
-#[derive(Serialize, Debug, Clone)]
+#[cfg_attr(feature = "serde", derive(Serialize))]
+#[derive(Debug, Clone)]
 pub struct VerbatimEnvironmentName {
     pub pos: Pos,
     pub kind: VerbatimEnvironmentNameKind,
@@ -546,7 +574,8 @@ pub struct VerbatimEnvironmentName {
 
 impl_get_pos_simple!(VerbatimEnvironmentName);
 
-#[derive(Serialize, Debug, Clone)]
+#[cfg_attr(feature = "serde", derive(Serialize))]
+#[derive(Debug, Clone)]
 pub struct DisplayMath {
     pub pos: Pos,
     pub content: Vec<MathToken>,
@@ -554,7 +583,8 @@ pub struct DisplayMath {
 
 impl_get_pos_simple!(DisplayMath);
 
-#[derive(Serialize, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Debug)]
+#[cfg_attr(feature = "serde", derive(Serialize))]
+#[derive(Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Debug)]
 pub enum MathEnvironmentNameKind {
     EquationStar,
     Equation,
@@ -573,7 +603,8 @@ pub enum MathEnvironmentNameKind {
     DisplayMath,
 }
 
-#[derive(Serialize, Debug, Clone)]
+#[cfg_attr(feature = "serde", derive(Serialize))]
+#[derive(Debug, Clone)]
 pub struct MathEnvironmentName {
     pub pos: Pos,
     pub kind: MathEnvironmentNameKind,
@@ -581,7 +612,8 @@ pub struct MathEnvironmentName {
 
 impl_get_pos_simple!(MathEnvironmentName);
 
-#[derive(Serialize, Debug, Clone)]
+#[cfg_attr(feature = "serde", derive(Serialize))]
+#[derive(Debug, Clone)]
 pub struct MathEnvironment {
     pub begin: BeginEnvironment,
     pub name: MathEnvironmentName,
@@ -607,7 +639,8 @@ impl GetPos for MathEnvironment {
     }
 }
 
-#[derive(Serialize, Debug, Clone)]
+#[cfg_attr(feature = "serde", derive(Serialize))]
+#[derive(Debug, Clone)]
 pub struct Environment {
     pub begin: BeginEnvironment,
     pub name: CharTokens,
@@ -627,7 +660,8 @@ impl GetPos for Environment {
     }
 }
 
-#[derive(Serialize, Debug, Clone)]
+#[cfg_attr(feature = "serde", derive(Serialize))]
+#[derive(Debug, Clone)]
 pub struct Number {
     pub pos: Pos,
     pub content: String,
@@ -652,7 +686,8 @@ impl Number {
 
 impl_get_pos_simple!(Number);
 
-#[derive(Serialize, Debug, Clone)]
+#[cfg_attr(feature = "serde", derive(Serialize))]
+#[derive(Debug, Clone)]
 pub struct Group {
     pub begin: BeginGroup,
     pub tokens: Vec<Token>,
@@ -671,7 +706,8 @@ impl GetPos for Group {
     }
 }
 
-#[derive(Serialize, Debug, Clone)]
+#[cfg_attr(feature = "serde", derive(Serialize))]
+#[derive(Debug, Clone)]
 pub struct MathGroup {
     pub begin: BeginGroup,
     pub tokens: Vec<MathToken>,
@@ -690,7 +726,8 @@ impl GetPos for MathGroup {
     }
 }
 
-#[derive(Serialize, Debug, Clone)]
+#[cfg_attr(feature = "serde", derive(Serialize))]
+#[derive(Debug, Clone)]
 pub struct Whitespace {
     pub pos: Pos,
 }
@@ -706,7 +743,8 @@ declare_transparent_enum! {
     }
 }
 
-#[derive(Serialize, Debug, Clone)]
+#[cfg_attr(feature = "serde", derive(Serialize))]
+#[derive(Debug, Clone)]
 pub struct OwnLineComment {
     pub pos: Pos,
     pub leading_space: LeadingSpace,
@@ -715,7 +753,8 @@ pub struct OwnLineComment {
 
 impl_get_pos_simple!(OwnLineComment);
 
-#[derive(Serialize, Debug, Clone)]
+#[cfg_attr(feature = "serde", derive(Serialize))]
+#[derive(Debug, Clone)]
 pub struct SameLineComment {
     pub pos: Pos,
     pub leading_spaces: bool,
@@ -724,7 +763,8 @@ pub struct SameLineComment {
 
 impl_get_pos_simple!(SameLineComment);
 
-#[derive(Serialize, Debug, Clone)]
+#[cfg_attr(feature = "serde", derive(Serialize))]
+#[derive(Debug, Clone)]
 pub struct LeadingSpace {
     pub pos: Pos,
     pub empty: bool,
@@ -732,20 +772,23 @@ pub struct LeadingSpace {
 
 impl_get_pos_simple!(LeadingSpace);
 
-#[derive(Serialize, Debug, Clone)]
+#[cfg_attr(feature = "serde", derive(Serialize))]
+#[derive(Debug, Clone)]
 pub struct Comment {
     pub comment_start: CommentStart,
     pub content: String,
 }
 
-#[derive(Serialize, Debug, Clone)]
+#[cfg_attr(feature = "serde", derive(Serialize))]
+#[derive(Debug, Clone)]
 pub struct ParBreak {
     pub pos: Pos,
 }
 
 impl_get_pos_simple!(ParBreak);
 
-#[derive(Serialize, Debug, Clone)]
+#[cfg_attr(feature = "serde", derive(Serialize))]
+#[derive(Debug, Clone)]
 pub struct MacroName {
     pub pos: Pos,
     pub content: String,
@@ -753,7 +796,8 @@ pub struct MacroName {
 
 impl_get_pos_simple!(MacroName);
 
-#[derive(Serialize, Debug, Clone)]
+#[cfg_attr(feature = "serde", derive(Serialize))]
+#[derive(Debug, Clone)]
 pub struct Macro {
     pub escape: Escape,
     pub name: MacroName,
@@ -765,7 +809,8 @@ impl GetPos for Macro {
     }
 }
 
-#[derive(Serialize, Debug, Clone)]
+#[cfg_attr(feature = "serde", derive(Serialize))]
+#[derive(Debug, Clone)]
 pub struct BeginDisplayMath {
     pub escape: Escape,
 }
@@ -776,7 +821,8 @@ impl GetPos for BeginDisplayMath {
     }
 }
 
-#[derive(Serialize, Debug, Clone)]
+#[cfg_attr(feature = "serde", derive(Serialize))]
+#[derive(Debug, Clone)]
 pub struct EndDisplayMath {
     pub escape: Escape,
 }
@@ -787,7 +833,8 @@ impl GetPos for EndDisplayMath {
     }
 }
 
-#[derive(Serialize, Debug, Clone)]
+#[cfg_attr(feature = "serde", derive(Serialize))]
+#[derive(Debug, Clone)]
 pub struct BeginInlineMath {
     pub escape: Escape,
 }
@@ -798,7 +845,8 @@ impl GetPos for BeginInlineMath {
     }
 }
 
-#[derive(Serialize, Debug, Clone)]
+#[cfg_attr(feature = "serde", derive(Serialize))]
+#[derive(Debug, Clone)]
 pub struct EndInlineMath {
     pub escape: Escape,
 }
@@ -809,7 +857,8 @@ impl GetPos for EndInlineMath {
     }
 }
 
-#[derive(Serialize, Debug, Clone)]
+#[cfg_attr(feature = "serde", derive(Serialize))]
+#[derive(Debug, Clone)]
 pub struct BeginEnvironment {
     pub escape: Escape,
 }
@@ -820,7 +869,8 @@ impl GetPos for BeginEnvironment {
     }
 }
 
-#[derive(Serialize, Debug, Clone)]
+#[cfg_attr(feature = "serde", derive(Serialize))]
+#[derive(Debug, Clone)]
 pub struct EndEnvironment {
     pub escape: Escape,
 }

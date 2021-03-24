@@ -24,7 +24,7 @@ peg::parser! {
     // based on:
     // https://github.com/siefkenj/latex-parser/blob/96f9bfe405008a0fd1da51dbba476e0353675090/src/grammars/latex.pegjs
     grammar parser() for str {
-        use crate::tex::ast::*;
+        use crate::ast::*;
 
         pub(crate) rule document() -> Document =
             content:(token()*) { Document { content } }
@@ -474,7 +474,7 @@ pub fn parse(input: &str) -> Result<ast::Document, ParseError<LineCol>> {
 
 #[cfg(test)]
 mod test {
-    use super::*;
+    use crate::parse;
     use serde::Serialize;
     use serde_json::{
         ser::{PrettyFormatter, Serializer},

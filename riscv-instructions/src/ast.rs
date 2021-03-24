@@ -1,8 +1,6 @@
 // SPDX-License-Identifier: LGPL-2.1-or-later
 // See Notices.txt for copyright information
 
-use crate::tex::ast;
-use ast::{input_context::InputContext, GetPos};
 use once_cell::unsync::OnceCell;
 use peg::{str::LineCol, Parse};
 use std::{
@@ -13,6 +11,7 @@ use std::{
     ops::{Range, RangeInclusive},
     str::FromStr,
 };
+use tex_parser::ast::{self, input_context::InputContext, GetPos};
 
 #[derive(Debug)]
 pub struct ParseError {
@@ -1611,7 +1610,7 @@ pub struct Instruction {
 pub fn parse(file_name: &str, input: &str) -> Result<InstructionSet> {
     ast::Pos::call_with_input_context(InputContext { file_name, input }, || {
         let parser = Parser::new(file_name, input);
-        let document = crate::tex::parse(input)
+        let document = tex_parser::parse(input)
             .map_err(|e| parser.err_line_col(e.location, format!("expected: {}", e.expected)))?;
         parser.parse_instruction_set(&document)
     })

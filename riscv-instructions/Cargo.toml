@@ -1,0 +1,27 @@
+# SPDX-License-Identifier: LGPL-2.1-or-later
+# See Notices.txt for copyright information
+[package]
+name = "riscv-instructions"
+version = "0.1.0"
+authors = ["Jacob Lifshay <programmerjake@gmail.com>"]
+edition = "2018"
+license = "LGPL-2.1-or-later"
+repository = "https://github.com/programmerjake/riscv-jit-emulator"
+description = "The table of RISC-V RV64GC (and Q, Zifencei, Zicsr) unprivileged instructions parsed from the official specification's TeX"
+exclude = [
+    "/riscv-isa-manual/**",
+    "!/riscv-isa-manual/LICENSE",
+    "!/riscv-isa-manual/README.md",
+    "!/riscv-isa-manual/src/",
+    "!/riscv-isa-manual/src/instr-table.tex",
+    "!/riscv-isa-manual/src/rvc-instr-table.tex",
+]
+
+[features]
+trace = ["peg/trace"]
+tex-serde = ["tex-parser/serde"]
+
+[dependencies]
+peg = "0.6.3"
+once_cell = "1.2"
+tex-parser = { version = "=0.1.0", path = "../tex-parser", default-features = false }
