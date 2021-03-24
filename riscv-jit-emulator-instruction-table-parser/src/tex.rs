@@ -66,6 +66,7 @@ peg::parser! {
             / whitespace()* t:subscript() whitespace()* { MathToken::Subscript(t) }
             / t:ignore() { MathToken::Ignore(t) }
             / t:whitespace() { MathToken::Whitespace(t) }
+            / t:number() { MathToken::Number(t) }
             / t:any_char() { MathToken::AnyChar(t) }
 
         rule char_tokens() -> CharTokens =

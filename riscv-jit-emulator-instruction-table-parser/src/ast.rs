@@ -88,7 +88,7 @@ impl<'input, 'rest> TableRowIterator<'input, 'rest> {
     fn new(
         parser: &'rest Parser<'input>,
         tabular_body: std::slice::Iter<'rest, ast::Token>,
-        pos_after_body: impl ast::GetPos,
+        pos_after_body: impl GetPos,
         column_definitions: &'rest [ColumnDefinition],
     ) -> Self {
         Self {
@@ -107,14 +107,23 @@ impl<'input, 'rest> TableRowIterator<'input, 'rest> {
             .or(self.column_ranges.last())
             .map_or(0, |c| c.indexes.end)
     }
+    fn columns_left(&self) -> usize {
+        self.column_definitions.len() - self.column_end_index()
+    }
+    fn is_field_column(&self) -> bool {
+        self.columns_left() > 1
+    }
+    fn is_opcode_column(&self) -> bool {
+        self.columns_left() == 1
+    }
     fn get_new_column_indexes(
         &mut self,
         new_column_width: usize,
-        pos: impl ast::GetPos,
+        pos: impl GetPos,
         reason: impl FnOnce() -> String,
     ) -> Result<Range<usize>> {
         let start_index = self.column_end_index();
-        let cols_left = self.column_definitions.len() - start_index;
+        let cols_left = self.columns_left();
         err_if!(
             new_column_width > cols_left,
             self.parser,
@@ -230,6 +239,8 @@ impl<'input, 'rest> TableRowIterator<'input, 'rest> {
                         &body.end,
                         self.column_definitions,
                         false,
+                        self.is_field_column(),
+                        self.is_opcode_column(),
                     )?;
                     self.parser
                         .skip_rest_of_column_body_else_error(&mut body_iter, false)?;
@@ -245,11 +256,15 @@ impl<'input, 'rest> TableRowIterator<'input, 'rest> {
                 }
                 token => {
                     assert!(self.column_range.is_none(), "token={:?}", token);
+                    let is_field_column = self.is_field_column();
+                    let is_opcode_column = self.is_opcode_column();
                     let body = self.parser.parse_column_body(
                         &mut self.tabular_body,
                         self.pos_after_body,
                         self.column_definitions,
                         true,
+                        is_field_column,
+                        is_opcode_column,
                     )?;
                     if body.is_none() {
                         continue;
@@ -336,6 +351,8 @@ impl<'input, 'rest> Iterator for PeekableTableRowIterator<'input, 'rest> {
 }
 
 impl<'input> Parser<'input> {
+    const COLUMN_START_PADDING: usize = 1;
+    const COLUMN_END_PADDING: usize = 1;
     fn new(file_name: &'input str, input: &'input str) -> Self {
         Self { file_name, input }
     }
@@ -348,7 +365,7 @@ impl<'input> Parser<'input> {
             message,
         }
     }
-    fn err_pos(&self, pos: impl ast::GetPos, message: String) -> ParseError {
+    fn err_pos(&self, pos: impl GetPos, message: String) -> ParseError {
         self.err_line_col(self.input.position_repr(pos.pos().byte_index), message)
     }
     fn expect_environment<'env>(
@@ -364,7 +381,7 @@ impl<'input> Parser<'input> {
     }
     fn unwrap_group_or_error<'t>(
         &self,
-        pos_if_token_is_none: impl ast::GetPos,
+        pos_if_token_is_none: impl GetPos,
         token: Option<Cow<'t, ast::Token>>,
     ) -> Result<Cow<'t, ast::Group>> {
         let token_pos = token.as_ref().map(|t| t.pos());
@@ -383,7 +400,7 @@ impl<'input> Parser<'input> {
     }
     fn parse_number_in_group<T: FromStr>(
         &self,
-        pos_if_token_is_none: impl ast::GetPos,
+        pos_if_token_is_none: impl GetPos,
         token: Option<Cow<'_, ast::Token>>,
         error_message: impl FnOnce() -> String,
     ) -> Result<(T, ast::Pos)>
@@ -468,7 +485,10 @@ impl<'input> Parser<'input> {
     }
     fn is_column_body_text(token: &ast::Token) -> bool {
         match token {
-            ast::Token::CharTokens(_) => true,
+            ast::Token::CharTokens(_)
+            | ast::Token::Group(_)
+            | ast::Token::Whitespace(_)
+            | ast::Token::Number(_) => true,
             ast::Token::Punctuation(ast::Punctuation { pos: _, ch }) if matches!(ch, '-' | '.') => {
                 true
             }
@@ -480,7 +500,8 @@ impl<'input> Parser<'input> {
             ast::Token::CharTokens(_) => true,
             ast::Token::Punctuation(_) => true,
             ast::Token::Whitespace(_) => true,
-            token => todo!("token = {:?}", token),
+            ast::Token::Macro(_) => true,
+            ast::Token::Group(_) => true,
             _ => false,
         }
     }
@@ -496,22 +517,80 @@ impl<'input> Parser<'input> {
             |token| format!("unexpected token: {:?}", token),
         )
     }
-    fn parse_field_def(
+    fn is_register_macro(macro_: &ast::Macro) -> bool {
+        matches!(
+            &*macro_.name.content,
+            "rdprime" | "rsoneprime" | "rstwoprime"
+        )
+    }
+    fn parse_field_def_name(
         &self,
-        name: ast::CharTokens,
+        first_token: Option<&ast::Token>,
         tabular_body: &mut std::slice::Iter<ast::Token>,
-        pos_after_body: impl ast::GetPos,
-        column_definitions: &[ColumnDefinition],
-        is_top_level: bool,
-    ) -> Result<FieldDef> {
-        let mut tabular_body_temp = tabular_body.clone();
+        pos_after_body: impl GetPos,
+    ) -> Result<FieldDefName> {
+        let token = unwrap_or!(
+            first_token.or_else(|| tabular_body.next()),
+            err!(self, pos_after_body, "expected field name")
+        );
+        match token {
+            ast::Token::Macro(macro_) if Self::is_register_macro(macro_) => {
+                Ok(FieldDefName::Macro(macro_.name.clone()))
+            }
+            ast::Token::CharTokens(char_tokens) => {
+                Ok(FieldDefName::CharTokens(char_tokens.clone()))
+            }
+            _ => err!(self, token, "expected field name"),
+        }
+    }
+    fn match_token_or_error<'a, T: GetPos>(
+        &self,
+        matches: impl FnOnce(&T) -> bool,
+        tabular_body: &mut std::slice::Iter<'a, T>,
+        pos_after_body: impl GetPos,
+        error_message: impl FnOnce() -> String,
+    ) -> Result<&'a T> {
+        let pos = match tabular_body.next() {
+            Some(token) if matches(token) => return Ok(token),
+            Some(token) => token.pos(),
+            None => pos_after_body.pos(),
+        };
+        Err(self.err_pos(pos, error_message()))
+    }
+    fn parse_field_def_slice(
+        &self,
+        name: FieldDefName,
+        tabular_body: &mut std::slice::Iter<ast::Token>,
+        pos_after_body: impl GetPos,
+    ) -> Result<FieldDefSlice> {
+        self.match_token_or_error(
+            |t| {
+                matches!(
+                    t,
+                    ast::Token::Punctuation(ast::Punctuation { pos: _, ch: '[' })
+                )
+            },
+            tabular_body,
+            &pos_after_body,
+            || "expected `[`".into(),
+        )?;
         let mut bit_ranges = Vec::new();
-        if let Some(ast::Token::Punctuation(ast::Punctuation { pos: _, ch: '[' })) =
-            tabular_body_temp.next()
-        {
-            *tabular_body = tabular_body_temp;
-            loop {
-                let (end, end_bit_pos): (u32, _) = match tabular_body.next() {
+        loop {
+            let (end, end_bit_pos): (u32, _) = match tabular_body.next() {
+                Some(ast::Token::Number(num)) => {
+                    (num.parse_with_err_arg(self, Self::err_pos)?, num.pos())
+                }
+                token => err!(
+                    self,
+                    token.map_or(pos_after_body.pos(), GetPos::pos),
+                    "expected number"
+                ),
+            };
+            if let Some(ast::Token::Punctuation(ast::Punctuation { pos: _, ch: ':' })) =
+                tabular_body.clone().next()
+            {
+                tabular_body.next();
+                let (start, start_bit_pos): (u32, _) = match tabular_body.next() {
                     Some(ast::Token::Number(num)) => {
                         (num.parse_with_err_arg(self, Self::err_pos)?, num.pos())
                     }
@@ -521,110 +600,276 @@ impl<'input> Parser<'input> {
                         "expected number"
                     ),
                 };
-                tabular_body_temp = tabular_body.clone();
-                if let Some(ast::Token::Punctuation(ast::Punctuation { pos: _, ch: ':' })) =
-                    tabular_body_temp.next()
-                {
-                    *tabular_body = tabular_body_temp;
-                    let (start, start_bit_pos): (u32, _) = match tabular_body.next() {
-                        Some(ast::Token::Number(num)) => {
-                            (num.parse_with_err_arg(self, Self::err_pos)?, num.pos())
-                        }
-                        token => err!(
-                            self,
-                            token.map_or(pos_after_body.pos(), GetPos::pos),
-                            "expected number"
-                        ),
-                    };
-                    err_if!(
-                        end < start,
-                        self,
-                        end_bit_pos,
-                        "range end ({}) must not be less than range start ({})",
-                        end,
-                        start
-                    );
-                    bit_ranges.push(FieldBitRange {
-                        bits: start..=end,
-                        end_bit_pos,
-                        start_bit_pos: Some(start_bit_pos),
-                    });
-                } else {
-                    bit_ranges.push(FieldBitRange {
-                        bits: end..=end,
-                        end_bit_pos,
-                        start_bit_pos: None,
-                    });
+                err_if!(
+                    end < start,
+                    self,
+                    end_bit_pos,
+                    "range end ({}) must not be less than range start ({})",
+                    end,
+                    start
+                );
+                bit_ranges.push(FieldBitRange {
+                    bits: start..=end,
+                    end_bit_pos,
+                    start_bit_pos: Some(start_bit_pos),
+                });
+            } else {
+                bit_ranges.push(FieldBitRange {
+                    bits: end..=end,
+                    end_bit_pos,
+                    start_bit_pos: None,
+                });
+            }
+            match unwrap_or!(
+                tabular_body.next(),
+                err!(self, pos_after_body, "missing `]`")
+            ) {
+                ast::Token::Punctuation(ast::Punctuation { pos: _, ch: ']' }) => {
+                    break;
                 }
-                tabular_body_temp = tabular_body.clone();
-                match unwrap_or!(
-                    tabular_body_temp.next(),
-                    err!(self, pos_after_body, "missing `]`")
-                ) {
-                    token if Self::is_column_body_ignored(token) => break,
-                    ast::Token::Punctuation(ast::Punctuation { pos: _, ch: ']' }) => {
-                        *tabular_body = tabular_body_temp;
-                        break;
+                ast::Token::DollarInlineMath(ast::DollarInlineMath {
+                    begin,
+                    content,
+                    end: _,
+                }) => match &**content {
+                    [ast::MathToken::Macro(ast::Macro { escape: _, name })]
+                        if name.content == "vert" =>
+                    {
+                        continue;
                     }
-                    ast::Token::DollarInlineMath(ast::DollarInlineMath {
-                        begin,
-                        content,
-                        end: _,
-                    }) => match &**content {
-                        [ast::MathToken::Macro(ast::Macro { escape: _, name })]
-                            if name.content == "vert" =>
-                        {
-                            *tabular_body = tabular_body_temp;
-                            continue;
-                        }
-                        _ => err!(self, begin, "expected `$\\vert$`"),
-                    },
-                    token => err!(self, token, "expected `$\\vert$` or `]`"),
-                }
+                    _ => err!(self, begin, "expected `$\\vert$`"),
+                },
+                token => err!(self, token, "expected `$\\vert$` or `]`"),
             }
         }
-        let bit_ranges = Some(bit_ranges).filter(|v| !v.is_empty());
-        Ok(FieldDef { name, bit_ranges })
+        Ok(FieldDefSlice { name, bit_ranges })
+    }
+    fn parse_field_def_alternate(
+        &self,
+        field_def_name: FieldDefName,
+        tabular_body: &mut std::slice::Iter<ast::Token>,
+        pos_after_body: impl GetPos,
+    ) -> Result<FieldDefAlternate> {
+        let mut names = vec![field_def_name];
+        while let Some(ast::Token::Punctuation(ast::Punctuation { pos: _, ch: '/' })) =
+            tabular_body.clone().next()
+        {
+            tabular_body.next();
+            names.push(self.parse_field_def_name(None, tabular_body, &pos_after_body)?);
+        }
+        Ok(FieldDefAlternate { names })
+    }
+    fn parse_field_def(
+        &self,
+        first_token: &ast::Token,
+        tabular_body: &mut std::slice::Iter<ast::Token>,
+        pos_after_body: impl GetPos,
+    ) -> Result<FieldDef> {
+        match first_token {
+            ast::Token::Number(num) => {
+                return Ok(FieldDef {
+                    body: FieldDefBody::LiteralNumber(num.clone()),
+                    excluded_values: Vec::new(),
+                });
+            }
+            ast::Token::Punctuation(p) if p.ch == '-' => {
+                let first_token = first_token.punctuation().unwrap();
+                let mut content = String::from(first_token.ch);
+                for _ in 1..3 {
+                    let token = self
+                        .match_token_or_error(
+                            |t| matches!(t, ast::Token::Punctuation(p) if p.ch == '-'),
+                            tabular_body,
+                            &pos_after_body,
+                            || "expected: `-`".into(),
+                        )?
+                        .punctuation()
+                        .unwrap();
+                    content.push(token.ch);
+                }
+                return Ok(FieldDef {
+                    body: FieldDefBody::Wildcard(Wildcard {
+                        pos: first_token.pos(),
+                        content,
+                    }),
+                    excluded_values: Vec::new(),
+                });
+            }
+            _ => {}
+        }
+        let field_def_name =
+            self.parse_field_def_name(Some(first_token), tabular_body, &pos_after_body)?;
+        let body = match tabular_body.clone().next() {
+            Some(ast::Token::Punctuation(ast::Punctuation { pos: _, ch: '[' })) => {
+                FieldDefBody::Slice(self.parse_field_def_slice(
+                    field_def_name,
+                    tabular_body,
+                    &pos_after_body,
+                )?)
+            }
+            _ => FieldDefBody::Alternate(self.parse_field_def_alternate(
+                field_def_name,
+                tabular_body,
+                &pos_after_body,
+            )?),
+        };
+        let excluded_values = match tabular_body
+            .clone()
+            .next()
+            .and_then(ast::Token::dollar_inline_math)
+            .map(|v| &*v.content)
+        {
+            Some([ast::MathToken::Macro(macro_)]) if macro_.name.content == "neq" => {
+                tabular_body.next();
+                match tabular_body.next() {
+                    Some(ast::Token::Number(num)) => vec![num.clone()],
+                    Some(ast::Token::DollarInlineMath(dollar_inline_math)) => {
+                        let mut dollar_inline_math_body = dollar_inline_math.content.iter();
+                        self.match_token_or_error(
+                            |t| matches!(t, ast::MathToken::Macro(m) if m.name.content == "{"),
+                            &mut dollar_inline_math_body,
+                            &dollar_inline_math.end,
+                            || "expected `\\{{`".into(),
+                        )?;
+                        let mut excluded_values = match dollar_inline_math_body.next() {
+                            Some(ast::MathToken::Number(num)) => vec![num.clone()],
+                            _ => err!(self, dollar_inline_math.content_pos(), "expected number"),
+                        };
+                        while let Some(token) = dollar_inline_math_body.next() {
+                            if matches!(token, ast::MathToken::Macro(m) if m.name.content == "}") {
+                                if let Some(token) = dollar_inline_math_body.next() {
+                                    err!(self, token, "unexpected token");
+                                }
+                                break;
+                            }
+                            err_if!(
+                                !matches!(
+                                    token,
+                                    ast::MathToken::AnyChar(ast::AnyChar { pos: _, ch: ',' })
+                                ),
+                                self,
+                                token,
+                                "expected `,` or `\\}}`"
+                            );
+                            match dollar_inline_math_body.next() {
+                                Some(ast::MathToken::Number(num)) => {
+                                    excluded_values.push(num.clone())
+                                }
+                                Some(token) => {
+                                    err!(self, token, "expected number")
+                                }
+                                None => {
+                                    err!(self, dollar_inline_math.end.pos(), "expected number")
+                                }
+                            }
+                        }
+                        excluded_values
+                    }
+                    token => err!(self,
+                        token.map_or_else(||pos_after_body.pos(), GetPos::pos),
+                        "expected number or list of numbers (like so: `$\\{{<num>[,<num>[,<num>[...]]]\\}}$`)"
+                    ),
+                }
+            }
+            _ => Vec::new(),
+        };
+        Ok(FieldDef {
+            body,
+            excluded_values,
+        })
+    }
+    fn parse_opcode_name(
+        &self,
+        first_token: &ast::Token,
+        tabular_body: &mut std::slice::Iter<ast::Token>,
+        is_top_level: bool,
+    ) -> Result<OpcodeName> {
+        let pos = first_token.pos();
+        let mut first_token = Some(first_token);
+        let mut name = None;
+        let mut group = None;
+        while let Some(token) = first_token.or_else(|| tabular_body.clone().next()) {
+            if Self::is_column_body_terminator(token, is_top_level) {
+                assert!(first_token.is_none());
+                break;
+            }
+            if first_token.take().is_none() {
+                tabular_body.next();
+            }
+            match token {
+                ast::Token::CharTokens(char_tokens) => name
+                    .get_or_insert(String::new())
+                    .push_str(&char_tokens.content),
+                ast::Token::Punctuation(p) => {
+                    name.get_or_insert(String::new()).push(p.ch);
+                }
+                ast::Token::Group(_) | ast::Token::Whitespace(_) => break,
+                _ => err!(self, token, "expected `{{`"),
+            }
+        }
+        while let Some(token) = tabular_body.clone().next() {
+            if Self::is_column_body_terminator(token, is_top_level) {
+                break;
+            }
+            tabular_body.next();
+            match token {
+                ast::Token::Whitespace(_) => {}
+                ast::Token::Group(g) => {
+                    group = Some(g.clone());
+                    break;
+                }
+                _ => err!(self, token, "expected: `{{`"),
+            }
+        }
+        Ok(OpcodeName {
+            pos,
+            name: unwrap_or!(name, err!(self, pos, "expected: opcode name")),
+            group,
+        })
     }
     fn parse_column_body(
         &self,
         tabular_body: &mut std::slice::Iter<ast::Token>,
-        pos_after_body: impl ast::GetPos,
+        pos_after_body: impl GetPos,
         column_definitions: &[ColumnDefinition],
         is_top_level: bool,
+        is_field_column: bool,
+        is_opcode_column: bool,
     ) -> Result<Option<ColumnBody>> {
         loop {
-            let mut tabular_body_peek = tabular_body.clone();
-            let token = unwrap_or!(tabular_body_peek.next(), return Ok(None));
-            dbg!(token);
+            let token = unwrap_or!(tabular_body.clone().next(), return Ok(None));
             if Self::is_column_body_terminator(token, is_top_level) {
                 return Ok(None);
             }
+            tabular_body.next();
             if Self::is_column_body_ignored(token) {
-                *tabular_body = tabular_body_peek;
                 continue;
             }
-            match token {
-                ast::Token::Macro(macro_) if macro_.name.content == "cline" && is_top_level => {
-                    *tabular_body = tabular_body_peek;
+            return Ok(Some(match token {
+                ast::Token::Macro(macro_)
+                    if matches!(&*macro_.name.content, "cline" | "whline") && is_top_level =>
+                {
                     self.unwrap_group_or_error(
                         &pos_after_body,
                         tabular_body.next().map(Cow::Borrowed),
                     )?;
                     continue;
                 }
+                ast::Token::Macro(macro_) if Self::is_register_macro(macro_) => {
+                    let field_def = self.parse_field_def(token, tabular_body, pos_after_body)?;
+                    self.skip_rest_of_column_body_else_error(tabular_body, is_top_level)?;
+                    ColumnBody::FieldDef(field_def)
+                }
                 ast::Token::Macro(macro_) if macro_.name.content == "instbit" => {
-                    *tabular_body = tabular_body_peek;
                     let (bit, pos) = self.parse_number_in_group(
                         pos_after_body,
                         tabular_body.next().map(Cow::Borrowed),
                         || "expected `{{<bit-number>}}` (like `{{12}}`)".into(),
                     )?;
                     self.skip_rest_of_column_body_else_error(tabular_body, is_top_level)?;
-                    return Ok(Some(ColumnBody::InstBit(InstBit { pos, bit })));
+                    ColumnBody::InstBit(InstBit { pos, bit })
                 }
                 ast::Token::Macro(macro_) if macro_.name.content == "instbitrange" => {
-                    *tabular_body = tabular_body_peek;
                     let (end_bit, end_bit_pos) = self.parse_number_in_group(
                         &pos_after_body,
                         tabular_body.next().map(Cow::Borrowed),
@@ -642,64 +887,61 @@ impl<'input> Parser<'input> {
                         "start bit must not be bigger than end bit"
                     );
                     self.skip_rest_of_column_body_else_error(tabular_body, is_top_level)?;
-                    return Ok(Some(ColumnBody::InstBitRange(InstBitRange {
+                    ColumnBody::InstBitRange(InstBitRange {
                         bits: start_bit..=end_bit,
                         end_bit_pos,
                         start_bit_pos,
-                    })));
+                    })
                 }
                 ast::Token::Macro(macro_) if macro_.name.content == "bf" => {
                     let mut tokens: Vec<ast::Token> = vec![token.clone()];
-                    *tabular_body = tabular_body_peek.clone();
-                    while let Some(token) = tabular_body_peek
+                    while let Some(token) = tabular_body
+                        .clone()
                         .next()
                         .filter(|token| Self::is_column_body_bold_text(token))
                     {
-                        *tabular_body = tabular_body_peek.clone();
+                        tabular_body.next();
                         tokens.push(token.clone());
                     }
                     self.skip_rest_of_column_body_else_error(tabular_body, is_top_level)?;
-                    return Ok(Some(ColumnBody::ColumnBodyBoldText(ColumnBodyBoldText {
+                    ColumnBody::ColumnBodyBoldText(ColumnBodyBoldText {
                         pos: tokens[0].pos(),
                         tokens,
-                    })));
+                    })
                 }
-                token if Self::is_column_body_text(token) => {
+                ast::Token::Group(g) => {
+                    self.skip_rest_of_column_body_else_error(tabular_body, is_top_level)?;
+                    ColumnBody::Group(g.clone())
+                }
+                _ if Self::is_column_body_text(token) => {
+                    if is_field_column {
+                        let field_def =
+                            self.parse_field_def(token, tabular_body, pos_after_body)?;
+                        self.skip_rest_of_column_body_else_error(tabular_body, is_top_level)?;
+                        return Ok(Some(ColumnBody::FieldDef(field_def)));
+                    } else if is_opcode_column {
+                        let opcode_name =
+                            self.parse_opcode_name(token, tabular_body, is_top_level)?;
+                        self.skip_rest_of_column_body_else_error(tabular_body, is_top_level)?;
+                        return Ok(Some(ColumnBody::OpcodeName(opcode_name)));
+                    }
                     let mut tokens: Vec<ast::Token> = vec![token.clone()];
-                    *tabular_body = tabular_body_peek.clone();
-                    while let Some(token) = tabular_body_peek
+                    while let Some(token) = tabular_body
+                        .clone()
                         .next()
                         .filter(|token| Self::is_column_body_text(token))
                     {
-                        *tabular_body = tabular_body_peek.clone();
+                        tabular_body.next();
                         tokens.push(token.clone());
                     }
-                    if let [ast::Token::CharTokens(_)] = &*tokens {
-                        let name = tokens.pop().unwrap().into_char_tokens().unwrap();
-                        let field_def = self.parse_field_def(
-                            name,
-                            tabular_body,
-                            pos_after_body,
-                            column_definitions,
-                            is_top_level,
-                        )?;
-                        self.skip_rest_of_column_body_else_error(tabular_body, is_top_level)?;
-                        return Ok(Some(ColumnBody::FieldDef(field_def)));
-                    }
                     self.skip_rest_of_column_body_else_error(tabular_body, is_top_level)?;
-                    return Ok(Some(ColumnBody::ColumnBodyText(ColumnBodyText {
+                    ColumnBody::ColumnBodyText(ColumnBodyText {
                         pos: tokens[0].pos(),
                         tokens,
-                    })));
+                    })
                 }
-                ast::Token::Number(num) => {
-                    *tabular_body = tabular_body_peek.clone();
-                    self.skip_rest_of_column_body_else_error(tabular_body, is_top_level)?;
-                    return Ok(Some(ColumnBody::LiteralNumber(num.clone())));
-                }
-                t => todo!("token={:?}", t),
-            }
-            unreachable!()
+                _ => err!(self, token, "unexpected token"),
+            }));
         }
     }
     fn assert_column_is_empty(&self, column: &ColumnRange) -> Result<()> {
@@ -735,7 +977,6 @@ impl<'input> Parser<'input> {
             row_iterator.next(),
             err!(self, pos, "expected: instruction bit ranges row")
         )?;
-        let column_definitions = &column_definitions[1..column_definitions.len() - 1];
         err_if!(
             columns.is_empty(),
             self,
@@ -760,7 +1001,8 @@ impl<'input> Parser<'input> {
             );
         }
         err_if!(
-            columns.len() != column_definitions.len(),
+            columns.len()
+                != column_definitions.len() - Self::COLUMN_START_PADDING - Self::COLUMN_END_PADDING,
             self,
             columns.last().map_or(pos, |v| v.pos),
             "not enough columns in instruction bit ranges row"
@@ -774,7 +1016,8 @@ impl<'input> Parser<'input> {
                 column.body.as_ref().unwrap(),
                 column.multi_column.as_ref().map(|v| v.kind),
             ) {
-                (ColumnBody::InstBit(v), None) => v.clone().into(),
+                (ColumnBody::InstBit(v), None)
+                | (ColumnBody::InstBit(v), Some(MultiColumnKind::Center)) => v.clone().into(),
                 (ColumnBody::InstBitRange(v), None) => v.clone(),
                 (ColumnBody::InstBit(right), Some(MultiColumnKind::Right)) => {
                     err_if!(
@@ -836,26 +1079,190 @@ impl<'input> Parser<'input> {
                     "expected 0"
                 );
             }
+            let mut padded_column_range = column_range.clone();
+            padded_column_range.start += Self::COLUMN_START_PADDING;
+            padded_column_range.end += Self::COLUMN_START_PADDING;
             let merged_def = MergedColumnDefinition {
-                column_range: column_range.clone(),
+                column_range: padded_column_range.clone(),
                 bit_range,
             };
-            for c in &column_definitions[column_range.clone()] {
+            for c in &column_definitions[padded_column_range.clone()] {
                 c.merged_def.set(merged_def.clone()).ok().unwrap();
             }
             index = column_range.end;
         }
         Ok(())
     }
+    fn parse_instruction_field(
+        &self,
+        column: ColumnRange,
+        column_definitions: &[ColumnDefinition],
+        is_fence_instruction_form: bool,
+    ) -> Result<InstructionField> {
+        let field_def = match column.body {
+            Some(ColumnBody::FieldDef(field_def)) => field_def,
+            _ => err!(self, column.pos, "expected: instruction field"),
+        };
+        let field_matches_name_or_num = |name: &str, num_len: usize| -> bool {
+            field_def.only_char_tokens().map(|v| &*v.content) == Some(name)
+                || matches!(&field_def.body, FieldDefBody::LiteralNumber(num) if num.content.len() == num_len)
+        };
+        if is_fence_instruction_form {
+            let bits = match column.indexes {
+                Range { start: 5, end: 6 } => {
+                    err_if!(
+                        !field_matches_name_or_num("succ", 4),
+                        self,
+                        column.pos,
+                        "expected fence instruction's `succ` field"
+                    );
+                    Some(20..=23)
+                }
+                Range { start: 6, end: 9 } => {
+                    err_if!(
+                        !field_matches_name_or_num("pred", 4),
+                        self,
+                        column.pos,
+                        "expected fence instruction's `pred` field"
+                    );
+                    Some(24..=27)
+                }
+                _ => None,
+            };
+            if let Some(bits) = bits {
+                return Ok(InstructionField {
+                    field_def,
+                    instruction_bit_range: InstBitRange {
+                        bits,
+                        end_bit_pos: column.pos,
+                        start_bit_pos: column.pos,
+                    },
+                });
+            }
+        }
+        let column_pos = column.pos;
+        let mismatch_err = || {
+            self.err_pos(
+                column_pos,
+                "instruction field doesn't match up with instruction-bit-numbers row".into(),
+            )
+        };
+        let start_column_definition = unwrap_or!(
+            column_definitions[column.indexes.start].merged_def.get(),
+            return Err(mismatch_err());
+        );
+        if start_column_definition.column_range.start != column.indexes.start {
+            return Err(mismatch_err());
+        }
+        let last_column_definition = unwrap_or!(
+            column_definitions[column.indexes.clone().last().unwrap()].merged_def.get(),
+            return Err(mismatch_err());
+        );
+        if last_column_definition.column_range.end != column.indexes.end {
+            return Err(mismatch_err());
+        }
+        let instruction_bit_range = InstBitRange {
+            bits: *start_column_definition.bit_range.bits.start()
+                ..=*last_column_definition.bit_range.bits.end(),
+            end_bit_pos: last_column_definition.bit_range.end_bit_pos,
+            start_bit_pos: start_column_definition.bit_range.start_bit_pos,
+        };
+        Ok(InstructionField {
+            instruction_bit_range,
+            field_def,
+        })
+    }
+    fn parse_instruction_fields(
+        &self,
+        row: Vec<ColumnRange>,
+        column_definitions: &[ColumnDefinition],
+        is_fence_instruction_form: bool,
+    ) -> Result<Vec<InstructionField>> {
+        let first = row.first().expect("row already checked to be non-empty");
+        err_if!(
+            first.indexes.len() != Self::COLUMN_START_PADDING,
+            self,
+            first.pos,
+            "spanning multiple columns using `\\multicolumn{{{}}}` is not allowed here",
+            first.indexes.len()
+        );
+        let last = row.last().expect("row already checked to be non-empty");
+        err_if!(
+            last.indexes.len() != Self::COLUMN_END_PADDING,
+            self,
+            last.pos,
+            "spanning multiple columns using `\\multicolumn{{{}}}` is not allowed here",
+            last.indexes.len()
+        );
+        err_if!(
+            row.len() < Self::COLUMN_START_PADDING + Self::COLUMN_END_PADDING,
+            self,
+            last.pos,
+            "row doesn't have enough columns"
+        );
+        let row_len = row.len();
+        let fields = row
+            .into_iter()
+            .take(row_len - Self::COLUMN_END_PADDING)
+            .skip(Self::COLUMN_START_PADDING)
+            .map(|column| {
+                self.parse_instruction_field(column, column_definitions, is_fence_instruction_form)
+            })
+            .collect::<Result<_>>()?;
+        Ok(fields)
+    }
     fn parse_instruction_form_rows(
         &self,
         row_iterator: &mut PeekableTableRowIterator,
         column_definitions: &[ColumnDefinition],
     ) -> Result<Vec<InstructionForm>> {
-        dbg!(row_iterator.collect::<Vec<_>>());
-        todo!()
+        let mut instruction_forms = Vec::new();
+        while let Some(row) = row_iterator.peek().transpose()? {
+            let name = match row.first() {
+                Some(ColumnRange {
+                    body: Some(ColumnBody::OpcodeName(name)),
+                    ..
+                }) if name.group.is_none() && name.name.ends_with("-type") => InstructionFormName {
+                    pos: name.pos,
+                    name: name.name.clone(),
+                },
+                _ => break,
+            };
+            let fields = self.parse_instruction_fields(
+                row_iterator.next().unwrap().unwrap(),
+                column_definitions,
+                false,
+            )?;
+            instruction_forms.push(InstructionForm { name, fields });
+        }
+        Ok(instruction_forms)
     }
-    fn parse_tabular_env<'env>(&self, tabular_env: &'env ast::Environment) -> Result<()> {
+    fn parse_instruction(
+        &self,
+        row: Vec<ColumnRange>,
+        column_definitions: &[ColumnDefinition],
+    ) -> Result<Instruction> {
+        let opcode = match row.first().expect("row already checked to be non-empty") {
+            ColumnRange {
+                body: Some(ColumnBody::OpcodeName(opcode)),
+                ..
+            } => opcode.clone(),
+            column => err!(self, column.pos, "expected: opcode"),
+        };
+        let is_fence_instruction_form = matches!(&*opcode.name, "FENCE" | "FENCE.TSO" | "PAUSE");
+        Ok(Instruction {
+            opcode,
+            fields: self.parse_instruction_fields(
+                row,
+                column_definitions,
+                is_fence_instruction_form,
+            )?,
+        })
+    }
+    fn parse_instruction_set_section(
+        &self,
+        tabular_env: &ast::Environment,
+    ) -> Result<InstructionSetSection> {
         let mut tabular_body = tabular_env.body.iter();
         let mut first_token = tabular_body.next();
         match first_token.and_then(|t| Some(&*t.char_tokens()?.content)) {
@@ -864,7 +1271,7 @@ impl<'input> Parser<'input> {
             }
             _ => {}
         }
-        let mut column_definitions = self.parse_tabular_column_definitions(unwrap_or!(
+        let column_definitions = self.parse_tabular_column_definitions(unwrap_or!(
             first_token
                 .or_else(|| tabular_body.next())
                 .and_then(ast::Token::group),
@@ -874,38 +1281,78 @@ impl<'input> Parser<'input> {
                 "expected `tabular` column definitions"
             )
         ))?;
-        dbg!(&column_definitions);
         let mut row_iterator =
             TableRowIterator::new(self, tabular_body, &tabular_env.end, &column_definitions)
                 .peekable();
         self.parse_blank_row(&mut row_iterator)?;
         self.parse_instruction_bit_ranges_row(&mut row_iterator, &column_definitions)?;
-        dbg!(&column_definitions);
-        let instruction_forms =
-            self.parse_instruction_form_rows(&mut row_iterator, &column_definitions)?;
-        todo!()
+        let forms = self.parse_instruction_form_rows(&mut row_iterator, &column_definitions)?;
+        let mut instructions = Vec::new();
+        for row in row_iterator {
+            let row = row?;
+            match &*row {
+                [ColumnRange {
+                    body: Some(ColumnBody::Group(_)),
+                    ..
+                }, ..]
+                | [ColumnRange { body: None, .. }, ColumnRange { body: None, .. }]
+                | [ColumnRange {
+                    body: Some(ColumnBody::ColumnBodyBoldText(_)),
+                    ..
+                }, ..] => continue,
+                _ => instructions.push(self.parse_instruction(row, &column_definitions)?),
+            }
+        }
+        Ok(InstructionSetSection {
+            forms,
+            instructions,
+        })
     }
     fn parse_instruction_set(&self, document: &ast::Document) -> Result<InstructionSet> {
+        let mut sections = Vec::new();
         for table_env in document.content.iter().filter_map(ast::Token::environment) {
             let table_env = self.expect_environment(table_env, "table")?;
+            let mut section = None;
             for small_env in table_env.body.iter().filter_map(ast::Token::environment) {
                 let small_env = self.expect_environment(small_env, "small")?;
                 for center_env in small_env.body.iter().filter_map(ast::Token::environment) {
                     let center_env = self.expect_environment(center_env, "center")?;
                     for tabular_env in center_env.body.iter().filter_map(ast::Token::environment) {
                         let tabular_env = self.expect_environment(tabular_env, "tabular")?;
-                        let v = self.parse_tabular_env(tabular_env)?;
-                        todo!();
+                        err_if!(
+                            section.is_some(),
+                            self,
+                            tabular_env,
+                            "multiple `\\begin{{tabular}}` in single `\\begin{{table}}`"
+                        );
+                        section = Some(self.parse_instruction_set_section(tabular_env)?);
                     }
                 }
             }
+            sections.push(unwrap_or!(
+                section,
+                err!(
+                    self,
+                    table_env,
+                    "missing `\\begin{{tabular}}` in this `\\begin{{table}}`"
+                )
+            ));
         }
-        err!(self, document, "no environment found")
+        err_if!(sections.is_empty(), self, document, "no environment found");
+        Ok(InstructionSet { sections })
     }
 }
 
 #[derive(Debug, Clone)]
-pub struct InstructionSet {}
+pub struct InstructionSetSection {
+    pub forms: Vec<InstructionForm>,
+    pub instructions: Vec<Instruction>,
+}
+
+#[derive(Debug, Clone)]
+pub struct InstructionSet {
+    pub sections: Vec<InstructionSetSection>,
+}
 
 #[derive(Debug, Clone)]
 pub enum ColumnKind {
@@ -962,15 +1409,114 @@ pub struct FieldBitRange {
 }
 
 #[derive(Debug, Clone)]
+pub enum FieldDefName {
+    Macro(ast::MacroName),
+    CharTokens(ast::CharTokens),
+}
+
+impl GetPos for FieldDefName {
+    fn pos(&self) -> ast::Pos {
+        match self {
+            FieldDefName::Macro(v) => v.pos(),
+            FieldDefName::CharTokens(v) => v.pos(),
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct FieldDefSlice {
+    pub name: FieldDefName,
+    pub bit_ranges: Vec<FieldBitRange>,
+}
+
+impl GetPos for FieldDefSlice {
+    fn pos(&self) -> ast::Pos {
+        self.name.pos()
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct FieldDefAlternate {
+    /// must be non-empty
+    pub names: Vec<FieldDefName>,
+}
+
+impl GetPos for FieldDefAlternate {
+    fn pos(&self) -> ast::Pos {
+        self.names[0].pos()
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct Wildcard {
+    /// must be non-empty
+    pub pos: ast::Pos,
+    pub content: String,
+}
+
+impl GetPos for Wildcard {
+    fn pos(&self) -> ast::Pos {
+        self.pos
+    }
+}
+
+#[derive(Debug, Clone)]
+pub enum FieldDefBody {
+    Alternate(FieldDefAlternate),
+    Slice(FieldDefSlice),
+    Wildcard(Wildcard),
+    LiteralNumber(ast::Number),
+}
+
+impl GetPos for FieldDefBody {
+    fn pos(&self) -> ast::Pos {
+        match self {
+            FieldDefBody::Alternate(v) => v.pos(),
+            FieldDefBody::Slice(v) => v.pos(),
+            FieldDefBody::Wildcard(v) => v.pos(),
+            FieldDefBody::LiteralNumber(v) => v.pos(),
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
 pub struct FieldDef {
-    pub name: ast::CharTokens,
-    pub bit_ranges: Option<Vec<FieldBitRange>>,
+    pub body: FieldDefBody,
+    pub excluded_values: Vec<ast::Number>,
+}
+
+impl FieldDef {
+    pub fn only_char_tokens(&self) -> Option<&ast::CharTokens> {
+        if !self.excluded_values.is_empty() {
+            return None;
+        }
+        match &self.body {
+            FieldDefBody::Alternate(FieldDefAlternate { names }) => match &**names {
+                [FieldDefName::CharTokens(char_tokens)] => Some(char_tokens),
+                _ => None,
+            },
+            _ => None,
+        }
+    }
+}
+
+impl GetPos for FieldDef {
+    fn pos(&self) -> ast::Pos {
+        self.body.pos()
+    }
 }
 
 #[derive(Debug, Clone)]
 pub struct ColumnBodyText {
     pub pos: ast::Pos,
     pub tokens: Vec<ast::Token>,
+}
+
+#[derive(Debug, Clone)]
+pub struct OpcodeName {
+    pub pos: ast::Pos,
+    pub name: String,
+    pub group: Option<ast::Group>,
 }
 
 #[derive(Debug, Clone)]
@@ -985,8 +1531,9 @@ pub enum ColumnBody {
     InstBitRange(InstBitRange),
     FieldDef(FieldDef),
     ColumnBodyText(ColumnBodyText),
+    OpcodeName(OpcodeName),
     ColumnBodyBoldText(ColumnBodyBoldText),
-    LiteralNumber(ast::Number),
+    Group(ast::Group),
 }
 
 impl GetPos for ColumnBody {
@@ -994,10 +1541,11 @@ impl GetPos for ColumnBody {
         match self {
             ColumnBody::InstBit(v) => v.pos,
             ColumnBody::InstBitRange(v) => v.end_bit_pos, // end is first in text
-            ColumnBody::FieldDef(v) => v.name.pos(),
+            ColumnBody::FieldDef(v) => v.pos(),
             ColumnBody::ColumnBodyText(v) => v.pos,
+            ColumnBody::OpcodeName(v) => v.pos,
             ColumnBody::ColumnBodyBoldText(v) => v.pos,
-            ColumnBody::LiteralNumber(v) => v.pos(),
+            ColumnBody::Group(v) => v.pos(),
         }
     }
 }
@@ -1037,9 +1585,27 @@ pub struct ColumnRange {
 }
 
 #[derive(Debug, Clone)]
-pub struct InstructionForm {
+pub struct InstructionField {
+    pub instruction_bit_range: InstBitRange,
+    pub field_def: FieldDef,
+}
+
+#[derive(Debug, Clone)]
+pub struct InstructionFormName {
     pub pos: ast::Pos,
-    // TODO: finish
+    pub name: String,
+}
+
+#[derive(Debug, Clone)]
+pub struct InstructionForm {
+    pub name: InstructionFormName,
+    pub fields: Vec<InstructionField>,
+}
+
+#[derive(Debug, Clone)]
+pub struct Instruction {
+    pub opcode: OpcodeName,
+    pub fields: Vec<InstructionField>,
 }
 
 pub fn parse(file_name: &str, input: &str) -> Result<InstructionSet> {
@@ -1053,7 +1619,6 @@ pub fn parse(file_name: &str, input: &str) -> Result<InstructionSet> {
 
 #[cfg(test)]
 mod test {
-
     #[test]
     fn test_parse_instr_table() {
         super::parse(
@@ -1063,6 +1628,20 @@ mod test {
                 "/../riscv-isa-manual/src/instr-table.tex"
             )),
         )
+        .map_err(|e| e.to_string())
+        .unwrap();
+    }
+
+    #[test]
+    fn test_parse_rvc_instr_table() {
+        super::parse(
+            "rvc-instr-table.tex",
+            include_str!(concat!(
+                env!("CARGO_MANIFEST_DIR"),
+                "/../riscv-isa-manual/src/rvc-instr-table.tex"
+            )),
+        )
+        .map_err(|e| e.to_string())
         .unwrap();
     }
 }

@@ -457,6 +457,7 @@ declare_transparent_enum! {
         Subscript(subscript, subscript_mut, into_subscript),
         Ignore(ignore, ignore_mut, into_ignore),
         Whitespace(whitespace, whitespace_mut, into_whitespace),
+        Number(number, number_mut, number_char),
         AnyChar(any_char, any_char_mut, into_any_char),
     }
 }
