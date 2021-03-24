@@ -1616,16 +1616,3 @@ pub fn parse(file_name: &str, input: &str) -> Result<InstructionSet> {
         parser.parse_instruction_set(&document)
     })
 }
-
-#[cfg(test)]
-mod test {
-    #[test]
-    fn test_parse_instr_table() {
-        crate::parse_instr_table();
-    }
-
-    #[test]
-    fn test_parse_rvc_instr_table() {
-        crate::parse_rvc_instr_table();
-    }
-}
