@@ -5,6 +5,7 @@ use once_cell::unsync::OnceCell;
 use peg::{str::LineCol, Parse};
 use std::{
     borrow::Cow,
+    cell::Cell,
     error::Error,
     fmt, mem,
     num::NonZeroUsize,
@@ -39,6 +40,7 @@ pub type Result<T, E = ParseError> = std::result::Result<T, E>;
 struct Parser<'a> {
     file_name: &'a str,
     input: &'a str,
+    instr_table_name: InstrTableName,
 }
 
 macro_rules! err {
@@ -352,8 +354,12 @@ impl<'input, 'rest> Iterator for PeekableTableRowIterator<'input, 'rest> {
 impl<'input> Parser<'input> {
     const COLUMN_START_PADDING: usize = 1;
     const COLUMN_END_PADDING: usize = 1;
-    fn new(file_name: &'input str, input: &'input str) -> Self {
-        Self { file_name, input }
+    fn new(file_name: &'input str, input: &'input str, instr_table_name: InstrTableName) -> Self {
+        Self {
+            file_name,
+            input,
+            instr_table_name,
+        }
     }
     fn err_line_col(&self, line_col: LineCol, message: String) -> ParseError {
         ParseError {
@@ -469,6 +475,11 @@ impl<'input> Parser<'input> {
             *tokens = temp_tokens;
         }
     }
+    fn skip_whitespace<'a, I: Iterator<Item = &'a ast::Token> + Clone>(&self, tokens: &mut I) {
+        while let Some(ast::Token::Whitespace(_)) = tokens.clone().next() {
+            tokens.next();
+        }
+    }
     fn is_column_body_ignored(token: &ast::Token) -> bool {
         match token {
             ast::Token::Whitespace(_) | ast::Token::ParBreak(_) => true,
@@ -532,15 +543,19 @@ impl<'input> Parser<'input> {
             first_token.or_else(|| tabular_body.next()),
             err!(self, pos_after_body, "expected field name")
         );
-        match token {
+        Ok(match token {
             ast::Token::Macro(macro_) if Self::is_register_macro(macro_) => {
-                Ok(FieldDefName::Macro(macro_.name.clone()))
+                FieldDefName::Macro(macro_.name.clone())
             }
-            ast::Token::CharTokens(char_tokens) => {
-                Ok(FieldDefName::CharTokens(char_tokens.clone()))
-            }
+            ast::Token::CharTokens(char_tokens) => FieldDefName::CharTokens(
+                char_tokens.clone(),
+                FieldZeroCondition {
+                    zero_denied: self.instr_table_name == InstrTableName::RvcInstrTable
+                        && char_tokens.content.starts_with("nz"),
+                },
+            ),
             _ => err!(self, token, "expected field name"),
-        }
+        })
     }
     fn match_token_or_error<'a, T: GetPos>(
         &self,
@@ -562,17 +577,17 @@ impl<'input> Parser<'input> {
         tabular_body: &mut std::slice::Iter<ast::Token>,
         pos_after_body: impl GetPos,
     ) -> Result<FieldDefSlice> {
-        self.match_token_or_error(
-            |t| {
-                matches!(
-                    t,
-                    ast::Token::Punctuation(ast::Punctuation { pos: _, ch: '[' })
-                )
-            },
-            tabular_body,
-            &pos_after_body,
-            || "expected `[`".into(),
-        )?;
+        match tabular_body.clone().next() {
+            Some(ast::Token::Punctuation(ast::Punctuation { pos: _, ch: '[' })) => {
+                tabular_body.next();
+            }
+            _ => {
+                return Ok(FieldDefSlice {
+                    name,
+                    bit_ranges: Vec::new(),
+                });
+            }
+        }
         let mut bit_ranges = Vec::new();
         loop {
             let (end, end_bit_pos): (u32, _) = match tabular_body.next() {
@@ -777,12 +792,118 @@ impl<'input> Parser<'input> {
             excluded_values,
         })
     }
-    fn parse_opcode_name(
+    fn parse_opcode_name_field_constraint(
+        &self,
+        tokens: &mut std::slice::Iter<ast::Token>,
+        pos_after_body: impl GetPos,
+    ) -> Result<OpcodeNameFieldConstraint> {
+        self.skip_whitespace(tokens);
+        let token = unwrap_or!(
+            tokens.next(),
+            err!(self, pos_after_body, "expected constraint")
+        );
+        let pos = token.pos();
+        let body = match token {
+            ast::Token::CharTokens(c) if c.content == "RES" => {
+                OpcodeNameFieldConstraintBody::ReservedForStandard
+            }
+            ast::Token::CharTokens(c) if c.content == "NSE" => {
+                OpcodeNameFieldConstraintBody::ReservedForCustom
+            }
+            ast::Token::CharTokens(c)
+                if c.content.chars().next().map(|c| c.is_ascii_lowercase()) == Some(true) =>
+            {
+                let name = self.parse_field_def_name(Some(token), tokens, &pos_after_body)?;
+                let field = self.parse_field_def_slice(name, tokens, &pos_after_body)?;
+                self.match_token_or_error(
+                    |t| matches!(t,ast::Token::Punctuation(p) if p.ch == '='),
+                    tokens,
+                    &pos_after_body,
+                    || "expected: `=`".into(),
+                )?;
+                let value = self
+                    .match_token_or_error(
+                        |t| t.number().is_some(),
+                        tokens,
+                        pos_after_body,
+                        || "expected: number".into(),
+                    )?
+                    .number()
+                    .unwrap()
+                    .clone();
+                OpcodeNameFieldConstraintBody::FieldCondition { field, value }
+            }
+            _ => err!(self, token, "expected constraint"),
+        };
+        self.skip_whitespace(tokens);
+        let separator = match tokens.clone().next() {
+            Some(ast::Token::Punctuation(p @ ast::Punctuation { ch: ',', .. }))
+            | Some(ast::Token::Punctuation(p @ ast::Punctuation { ch: ';', .. })) => {
+                tokens.next();
+                Some(p.clone())
+            }
+            _ => None,
+        };
+        Ok(OpcodeNameFieldConstraint {
+            pos,
+            body,
+            separator,
+        })
+    }
+    fn parse_opcode_name_field_constraints(
+        &self,
+        group: &ast::Group,
+    ) -> Result<Vec<OpcodeNameFieldConstraint>> {
+        let mut body = group.tokens.iter();
+        self.match_token_or_error(
+            |t| matches! (t, ast::Token::Macro(m) if m.name.content == "em"),
+            &mut body,
+            &group.end,
+            || "expected: `\\em`".into(),
+        )?;
+        self.skip_whitespace(&mut body);
+        self.match_token_or_error(
+            |t| matches! (t, ast::Token::Macro(m) if m.name.content == "tiny"),
+            &mut body,
+            &group.end,
+            || "expected: `\\tiny`".into(),
+        )?;
+        self.skip_whitespace(&mut body);
+        self.match_token_or_error(
+            |t| matches! (t, ast::Token::Punctuation(p) if p.ch == '('),
+            &mut body,
+            &group.end,
+            || "expected: `(`".into(),
+        )?;
+        let mut constraints = Vec::new();
+        loop {
+            constraints.push(self.parse_opcode_name_field_constraint(&mut body, &group.end)?);
+            self.skip_whitespace(&mut body);
+            if body
+                .clone()
+                .next()
+                .and_then(|p| p.punctuation())
+                .map(|p| p.ch)
+                == Some(')')
+            {
+                body.next();
+                break;
+            }
+        }
+        self.skip_rest_if_matches_else_error(
+            &mut body,
+            |_| false,
+            |_| false,
+            |_| "expected `}`".into(),
+        )?;
+        Ok(constraints)
+    }
+    fn parse_opcode_name_field(
         &self,
         first_token: &ast::Token,
         tabular_body: &mut std::slice::Iter<ast::Token>,
         is_top_level: bool,
-    ) -> Result<OpcodeName> {
+    ) -> Result<OpcodeNameField> {
         let pos = first_token.pos();
         let mut first_token = Some(first_token);
         let mut name = None;
@@ -814,16 +935,21 @@ impl<'input> Parser<'input> {
             match token {
                 ast::Token::Whitespace(_) => {}
                 ast::Token::Group(g) => {
-                    group = Some(g.clone());
+                    group = Some(g);
                     break;
                 }
                 _ => err!(self, token, "expected: `{{`"),
             }
         }
-        Ok(OpcodeName {
+        let constraints = if let Some(group) = group {
+            self.parse_opcode_name_field_constraints(group)?
+        } else {
+            Vec::new()
+        };
+        Ok(OpcodeNameField {
             pos,
             name: unwrap_or!(name, err!(self, pos, "expected: opcode name")),
-            group,
+            constraints,
         })
     }
     fn parse_column_body(
@@ -919,10 +1045,10 @@ impl<'input> Parser<'input> {
                         self.skip_rest_of_column_body_else_error(tabular_body, is_top_level)?;
                         return Ok(Some(ColumnBody::FieldDef(field_def)));
                     } else if is_opcode_column {
-                        let opcode_name =
-                            self.parse_opcode_name(token, tabular_body, is_top_level)?;
+                        let opcode_name_field =
+                            self.parse_opcode_name_field(token, tabular_body, is_top_level)?;
                         self.skip_rest_of_column_body_else_error(tabular_body, is_top_level)?;
-                        return Ok(Some(ColumnBody::OpcodeName(opcode_name)));
+                        return Ok(Some(ColumnBody::OpcodeName(opcode_name_field)));
                     }
                     let mut tokens: Vec<ast::Token> = vec![token.clone()];
                     while let Some(token) = tabular_body
@@ -1221,10 +1347,12 @@ impl<'input> Parser<'input> {
                 Some(ColumnRange {
                     body: Some(ColumnBody::OpcodeName(name)),
                     ..
-                }) if name.group.is_none() && name.name.ends_with("-type") => InstructionFormName {
-                    pos: name.pos,
-                    name: name.name.clone(),
-                },
+                }) if name.constraints.is_empty() && name.name.ends_with("-type") => {
+                    InstructionFormName {
+                        pos: name.pos,
+                        name: name.name.clone(),
+                    }
+                }
                 _ => break,
             };
             let fields = self.parse_instruction_fields(
@@ -1236,11 +1364,29 @@ impl<'input> Parser<'input> {
         }
         Ok(instruction_forms)
     }
+    fn parse_rvc_isa_extension(&self, opcode: &OpcodeNameField) -> Result<ISAExtension> {
+        Ok(if opcode.name.starts_with("C.F") {
+            if opcode.name.ends_with("W") || opcode.name.ends_with("WSP") {
+                ISAExtension::F
+            } else if opcode.name.ends_with("D") || opcode.name.ends_with("DSP") {
+                ISAExtension::D
+            } else {
+                err!(
+                    self,
+                    opcode.pos,
+                    "unrecognized compressed floating-point opcode: {:?}",
+                    opcode.name
+                );
+            }
+        } else {
+            ISAExtension::I
+        })
+    }
     fn parse_instruction(
         &self,
         row: Vec<ColumnRange>,
         column_definitions: &[ColumnDefinition],
-    ) -> Result<Instruction> {
+    ) -> Result<Vec<Instruction>> {
         let opcode = match row.first().expect("row already checked to be non-empty") {
             ColumnRange {
                 body: Some(ColumnBody::OpcodeName(opcode)),
@@ -1248,15 +1394,45 @@ impl<'input> Parser<'input> {
             } => opcode.clone(),
             column => err!(self, column.pos, "expected: opcode"),
         };
-        let is_fence_instruction_form = matches!(&*opcode.name, "FENCE" | "FENCE.TSO" | "PAUSE");
-        Ok(Instruction {
-            opcode,
-            fields: self.parse_instruction_fields(
-                row,
-                column_definitions,
-                is_fence_instruction_form,
-            )?,
-        })
+        let extension;
+        let bases;
+        match self.instr_table_name {
+            InstrTableName::InstrTable => {
+                todo!()
+            }
+            InstrTableName::RvcInstrTable => {
+                extension = self.parse_rvc_isa_extension(&opcode)?;
+                bases = ISABase::VALUES.to_vec();
+            }
+        }
+        let OpcodeNameField {
+            pos,
+            name,
+            constraints,
+        } = opcode;
+        let is_fence_instruction_form = matches!(&*name, "FENCE" | "FENCE.TSO" | "PAUSE");
+        let instruction_name = InstructionName { pos, name };
+        let fields =
+            self.parse_instruction_fields(row, column_definitions, is_fence_instruction_form)?;
+        let mut instructions = Vec::with_capacity(ISABase::VALUES.len());
+        if constraints.is_empty() {
+            for base in bases {
+                instructions.push(Instruction {
+                    isa_module: ISAModule { base, extension },
+                    name: instruction_name.clone(),
+                    fields: fields.clone(),
+                });
+            }
+        } else {
+            err_if!(
+                self.instr_table_name != InstrTableName::RvcInstrTable,
+                self,
+                constraints[0].pos(),
+                "constraints not allowed here"
+            );
+            todo!()
+        }
+        Ok(instructions)
     }
     fn parse_instruction_set_section(
         &self,
@@ -1299,7 +1475,7 @@ impl<'input> Parser<'input> {
                     body: Some(ColumnBody::ColumnBodyBoldText(_)),
                     ..
                 }, ..] => continue,
-                _ => instructions.push(self.parse_instruction(row, &column_definitions)?),
+                _ => instructions.extend(self.parse_instruction(row, &column_definitions)?),
             }
         }
         Ok(InstructionSetSection {
@@ -1407,17 +1583,22 @@ pub struct FieldBitRange {
     pub start_bit_pos: Option<ast::Pos>,
 }
 
+#[derive(Clone, Debug)]
+pub struct FieldZeroCondition {
+    pub zero_denied: bool,
+}
+
 #[derive(Debug, Clone)]
 pub enum FieldDefName {
     Macro(ast::MacroName),
-    CharTokens(ast::CharTokens),
+    CharTokens(ast::CharTokens, FieldZeroCondition),
 }
 
 impl GetPos for FieldDefName {
     fn pos(&self) -> ast::Pos {
         match self {
             FieldDefName::Macro(v) => v.pos(),
-            FieldDefName::CharTokens(v) => v.pos(),
+            FieldDefName::CharTokens(v, _) => v.pos(),
         }
     }
 }
@@ -1491,7 +1672,7 @@ impl FieldDef {
         }
         match &self.body {
             FieldDefBody::Alternate(FieldDefAlternate { names }) => match &**names {
-                [FieldDefName::CharTokens(char_tokens)] => Some(char_tokens),
+                [FieldDefName::CharTokens(char_tokens, _)] => Some(char_tokens),
                 _ => None,
             },
             _ => None,
@@ -1512,10 +1693,38 @@ pub struct ColumnBodyText {
 }
 
 #[derive(Debug, Clone)]
-pub struct OpcodeName {
+pub enum OpcodeCondition {}
+
+#[derive(Debug, Clone)]
+pub enum OpcodeNameFieldConstraintBody {
+    ISAs(Vec<ISABase>),
+    FieldCondition {
+        field: FieldDefSlice,
+        value: ast::Number,
+    },
+    Hint,
+    ReservedForStandard,
+    ReservedForCustom,
+}
+
+#[derive(Debug, Clone)]
+pub struct OpcodeNameFieldConstraint {
+    pub pos: ast::Pos,
+    pub body: OpcodeNameFieldConstraintBody,
+    pub separator: Option<ast::Punctuation>,
+}
+
+impl GetPos for OpcodeNameFieldConstraint {
+    fn pos(&self) -> ast::Pos {
+        self.pos
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct OpcodeNameField {
     pub pos: ast::Pos,
     pub name: String,
-    pub group: Option<ast::Group>,
+    pub constraints: Vec<OpcodeNameFieldConstraint>,
 }
 
 #[derive(Debug, Clone)]
@@ -1530,7 +1739,7 @@ pub enum ColumnBody {
     InstBitRange(InstBitRange),
     FieldDef(FieldDef),
     ColumnBodyText(ColumnBodyText),
-    OpcodeName(OpcodeName),
+    OpcodeName(OpcodeNameField),
     ColumnBodyBoldText(ColumnBodyBoldText),
     Group(ast::Group),
 }
@@ -1601,15 +1810,61 @@ pub struct InstructionForm {
     pub fields: Vec<InstructionField>,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum ISABase {
+    RV32I,
+    RV64I,
+}
+
+impl ISABase {
+    pub const VALUES: &'static [Self] = &[ISABase::RV32I, ISABase::RV64I];
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum ISAExtension {
+    I,
+    M,
+    A,
+    F,
+    D,
+    Q,
+    C,
+    Zifencei,
+    Zicsr,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct ISAModule {
+    pub base: ISABase,
+    pub extension: ISAExtension,
+}
+
+#[derive(Debug, Clone)]
+pub struct InstructionName {
+    pub pos: ast::Pos,
+    pub name: String,
+}
+
 #[derive(Debug, Clone)]
 pub struct Instruction {
-    pub opcode: OpcodeName,
+    pub isa_module: ISAModule,
+    pub name: InstructionName,
     pub fields: Vec<InstructionField>,
 }
 
-pub fn parse(file_name: &str, input: &str) -> Result<InstructionSet> {
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum InstrTableName {
+    InstrTable,
+    RvcInstrTable,
+}
+
+pub fn parse(
+    file_name: &str,
+    input: &str,
+    instr_table_name: InstrTableName,
+) -> Result<InstructionSet> {
     ast::Pos::call_with_input_context(InputContext { file_name, input }, || {
-        let parser = Parser::new(file_name, input);
+        let parser = Parser::new(file_name, input, instr_table_name);
         let document = tex_parser::parse(input)
             .map_err(|e| parser.err_line_col(e.location, format!("expected: {}", e.expected)))?;
         parser.parse_instruction_set(&document)

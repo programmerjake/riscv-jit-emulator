@@ -5,25 +5,31 @@ pub mod ast;
 pub use ast::parse;
 
 macro_rules! parse_path {
-    ($path:expr) => {
-        ast::parse($path, include_str!($path))
+    ($path:expr, $table_name:expr) => {
+        ast::parse($path, include_str!($path), $table_name)
             .map_err(|e| e.to_string())
             .unwrap()
     };
 }
 
 pub fn parse_rvc_instr_table() -> ast::InstructionSet {
-    parse_path!(concat!(
-        env!("CARGO_MANIFEST_DIR"),
-        "/riscv-isa-manual/src/rvc-instr-table.tex"
-    ))
+    parse_path!(
+        concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/riscv-isa-manual/src/rvc-instr-table.tex",
+        ),
+        ast::InstrTableName::RvcInstrTable
+    )
 }
 
 pub fn parse_instr_table() -> ast::InstructionSet {
-    parse_path!(concat!(
-        env!("CARGO_MANIFEST_DIR"),
-        "/riscv-isa-manual/src/instr-table.tex"
-    ))
+    parse_path!(
+        concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/riscv-isa-manual/src/instr-table.tex"
+        ),
+        ast::InstrTableName::InstrTable
+    )
 }
 
 #[cfg(test)]
