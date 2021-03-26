@@ -10,9 +10,84 @@ use std::{
     fmt, mem,
     num::NonZeroUsize,
     ops::{Range, RangeInclusive},
+    slice,
     str::FromStr,
 };
 use tex_parser::ast::{self, input_context::InputContext, GetPos};
+
+macro_rules! opcode_constraint_separator {
+    () => {
+        None
+    };
+    (_) => {
+        _
+    };
+    (',') => {
+        Some(ast::Punctuation { ch: ',', .. })
+    };
+    (';') => {
+        Some(ast::Punctuation { ch: ';', .. })
+    };
+}
+
+macro_rules! opcode_constraint_field_def_name {
+    ({$char_tokens:pat, zero_denied: $zero_denied:pat}) => {
+        FieldDefName::CharTokens(
+            $char_tokens,
+            FieldZeroCondition {
+                zero_denied: $zero_denied,
+            },
+        )
+    };
+}
+
+macro_rules! opcode_constraint_field_def_slice {
+    ({$name:tt, $bit_ranges:ident}) => {
+        FieldDefSlice {
+            name: opcode_constraint_field_def_name!($name),
+            bit_ranges: $bit_ranges,
+        }
+    };
+}
+
+macro_rules! opcode_constraint_body {
+    (RES) => {
+        OpcodeNameFieldConstraintBody::ReservedForStandard
+    };
+    (NSE) => {
+        OpcodeNameFieldConstraintBody::ReservedForCustom
+    };
+    (HINT) => {
+        OpcodeNameFieldConstraintBody::Hint
+    };
+    ({$field:tt == $value:ident}) => {
+        OpcodeNameFieldConstraintBody::FieldCondition {
+            field: opcode_constraint_field_def_slice!($field),
+            is_equality: true,
+            value: $value,
+        }
+    };
+    ({$field:tt != $value:ident}) => {
+        OpcodeNameFieldConstraintBody::FieldCondition {
+            field: opcode_constraint_field_def_slice!($field),
+            is_equality: false,
+            value: $value,
+        }
+    };
+    ({isas: $isas:pat}) => {
+        OpcodeNameFieldConstraintBody::ISAs($isas)
+    };
+}
+
+macro_rules! opcode_constraint {
+    ($body:tt $(, $separator:tt)?) => {
+        OpcodeNameFieldConstraint {
+            body: opcode_constraint_body!($body),
+            separator: opcode_constraint_separator!($($separator)?),
+            ..
+        }
+    };
+}
 
 #[derive(Debug)]
 pub struct ParseError {
@@ -792,6 +867,36 @@ impl<'input> Parser<'input> {
             excluded_values,
         })
     }
+    fn parse_opcode_name_field_constraint_isas(
+        &self,
+        first_isa: Option<ISABase>,
+        tokens: &mut std::slice::Iter<ast::Token>,
+        pos_after_body: impl GetPos,
+    ) -> Result<Vec<ISABase>> {
+        let mut retval = Vec::new();
+        retval.extend(first_isa);
+        while let Some(ast::Token::Punctuation(ast::Punctuation { ch: '/', .. })) =
+            tokens.clone().next()
+        {
+            tokens.next();
+            retval.push(match tokens.next() {
+                Some(ast::Token::Number(num)) => match &*num.content {
+                    "32" => ISABase::RV32I,
+                    "64" => ISABase::RV64I,
+                    "128" => continue,
+                    _ => err!(self, num, "invalid ISA bit-count: expected 32, 64, or 128"),
+                },
+                token => err!(
+                    self,
+                    token
+                        .map(GetPos::pos)
+                        .unwrap_or_else(|| pos_after_body.pos()),
+                    "expected ISA bit-count: expected 32, 64, or 128"
+                ),
+            });
+        }
+        Ok(retval)
+    }
     fn parse_opcode_name_field_constraint(
         &self,
         tokens: &mut std::slice::Iter<ast::Token>,
@@ -810,17 +915,44 @@ impl<'input> Parser<'input> {
             ast::Token::CharTokens(c) if c.content == "NSE" => {
                 OpcodeNameFieldConstraintBody::ReservedForCustom
             }
+            ast::Token::CharTokens(c) if c.content == "HINT" => OpcodeNameFieldConstraintBody::Hint,
+            ast::Token::CharTokens(c) if c.content == "RV32" => {
+                OpcodeNameFieldConstraintBody::ISAs(self.parse_opcode_name_field_constraint_isas(
+                    Some(ISABase::RV32I),
+                    tokens,
+                    pos_after_body,
+                )?)
+            }
+            ast::Token::CharTokens(c) if c.content == "RV64" => {
+                OpcodeNameFieldConstraintBody::ISAs(self.parse_opcode_name_field_constraint_isas(
+                    Some(ISABase::RV64I),
+                    tokens,
+                    pos_after_body,
+                )?)
+            }
+            ast::Token::CharTokens(c) if c.content == "RV128" => {
+                OpcodeNameFieldConstraintBody::ISAs(self.parse_opcode_name_field_constraint_isas(
+                    None,
+                    tokens,
+                    pos_after_body,
+                )?)
+            }
             ast::Token::CharTokens(c)
                 if c.content.chars().next().map(|c| c.is_ascii_lowercase()) == Some(true) =>
             {
                 let name = self.parse_field_def_name(Some(token), tokens, &pos_after_body)?;
                 let field = self.parse_field_def_slice(name, tokens, &pos_after_body)?;
-                self.match_token_or_error(
-                    |t| matches!(t,ast::Token::Punctuation(p) if p.ch == '='),
-                    tokens,
-                    &pos_after_body,
-                    || "expected: `=`".into(),
-                )?;
+                let is_equality = match tokens.next() {
+                    Some(ast::Token::DollarInlineMath(v)) if matches!(&*v.content, [ast::MathToken::Macro(m)] if m.name.content == "neq") => {
+                        false
+                    }
+                    Some(ast::Token::Punctuation(p)) if p.ch == '=' => true,
+                    token => err!(
+                        self,
+                        token.map_or_else(|| pos_after_body.pos(), GetPos::pos),
+                        r#"expected: `=` or `$\neq$`"#
+                    ),
+                };
                 let value = self
                     .match_token_or_error(
                         |t| t.number().is_some(),
@@ -831,7 +963,11 @@ impl<'input> Parser<'input> {
                     .number()
                     .unwrap()
                     .clone();
-                OpcodeNameFieldConstraintBody::FieldCondition { field, value }
+                OpcodeNameFieldConstraintBody::FieldCondition {
+                    field,
+                    is_equality,
+                    value,
+                }
             }
             _ => err!(self, token, "expected constraint"),
         };
@@ -890,6 +1026,7 @@ impl<'input> Parser<'input> {
                 break;
             }
         }
+        self.skip_whitespace(&mut body);
         self.skip_rest_if_matches_else_error(
             &mut body,
             |_| false,
@@ -1412,7 +1549,7 @@ impl<'input> Parser<'input> {
         } = opcode;
         let is_fence_instruction_form = matches!(&*name, "FENCE" | "FENCE.TSO" | "PAUSE");
         let instruction_name = InstructionName { pos, name };
-        let fields =
+        let mut fields =
             self.parse_instruction_fields(row, column_definitions, is_fence_instruction_form)?;
         let mut instructions = Vec::with_capacity(ISABase::VALUES.len());
         if constraints.is_empty() {
@@ -1423,14 +1560,344 @@ impl<'input> Parser<'input> {
                     fields: fields.clone(),
                 });
             }
-        } else {
-            err_if!(
-                self.instr_table_name != InstrTableName::RvcInstrTable,
-                self,
-                constraints[0].pos(),
-                "constraints not allowed here"
-            );
-            todo!()
+            return Ok(instructions);
+        }
+        err_if!(
+            self.instr_table_name != InstrTableName::RvcInstrTable,
+            self,
+            constraints[0].pos(),
+            "constraints not allowed here"
+        );
+        let bases = match &*constraints {
+            [opcode_constraint!(HINT, ','), opcode_constraint!(
+                {
+                    {
+                        { field_name, zero_denied: true },
+                        bit_ranges
+                    } != value
+                }
+            )] if instruction_name.name == "C.NOP"
+                && bit_ranges.is_empty()
+                && value.content == "0" =>
+            {
+                for field in &mut fields {
+                    for name in field.field_def.body.names_mut() {
+                        match name {
+                            FieldDefName::CharTokens(
+                                ast::CharTokens { content, .. },
+                                FieldZeroCondition { zero_denied },
+                            ) if *content == field_name.content => *zero_denied = false,
+                            _ => {}
+                        }
+                    }
+                }
+                ISABase::VALUES.to_vec()
+            }
+            [opcode_constraint!(RES, ','), opcode_constraint!(
+                {
+                    {
+                        { _, zero_denied: true },
+                        bit_ranges1
+                    } == value1
+                }, ';'
+            ), opcode_constraint!(HINT, ','), opcode_constraint!(
+                {
+                    {
+                        { field_name, zero_denied: false },
+                        bit_ranges2
+                    } == value2
+                }
+            )] if instruction_name.name == "C.LUI"
+                && bit_ranges1.is_empty()
+                && value1.content == "0"
+                && bit_ranges2.is_empty()
+                && value2.content == "0" =>
+            {
+                for field in &mut fields {
+                    if field
+                        .field_def
+                        .body
+                        .find_matches_char_tokens(&field_name.content)
+                        .is_none()
+                    {
+                        continue;
+                    }
+                    match &*field.field_def.excluded_values {
+                        [num0, num2] if num0.content == "0" && num2.content == "2" => {
+                            field.field_def.excluded_values.remove(0);
+                        }
+                        _ => err!(self, &field.field_def, "unexpected field value"),
+                    }
+                }
+                ISABase::VALUES.to_vec()
+            }
+            [opcode_constraint!(RES, ','), opcode_constraint!(
+                {
+                    {
+                        { _, zero_denied: true },
+                        bit_ranges
+                    } == value
+                }, _
+            )]
+            | [opcode_constraint!(HINT, ','), opcode_constraint!(
+                {
+                    {
+                        { _, zero_denied: true },
+                        bit_ranges
+                    } == value
+                }
+            )]
+            | [opcode_constraint!(HINT, ','), opcode_constraint!(
+                {
+                    {
+                        { _, zero_denied: false },
+                        bit_ranges
+                    } == value
+                }
+            )] if value.content == "0" && bit_ranges.is_empty() => ISABase::VALUES.to_vec(),
+            [opcode_constraint!({ isas: isas }, _)] => isas.to_vec(),
+            [opcode_constraint!({ isas: isas }, ';'), opcode_constraint!(RES, ','), opcode_constraint!(
+                {
+                    {
+                        { field_name, zero_denied: false },
+                        bit_ranges
+                    } == value
+                }
+            )] if bit_ranges.is_empty() && value.content == "0" => {
+                for field in &mut fields {
+                    if field
+                        .field_def
+                        .body
+                        .find_matches_char_tokens(&field_name.content)
+                        .is_none()
+                    {
+                        continue;
+                    }
+                    for name in field.field_def.body.names_mut() {
+                        match name {
+                            FieldDefName::CharTokens(_, FieldZeroCondition { zero_denied }) => {
+                                *zero_denied = true
+                            }
+                            _ => {}
+                        }
+                    }
+                }
+                isas.to_vec()
+            }
+            [opcode_constraint!({ isas: isas }), opcode_constraint!(NSE, ','), opcode_constraint!(
+                {
+                    {
+                        { field_name, zero_denied: _ },
+                        bit_ranges
+                    } == value
+                }
+            )] if bit_ranges.len() == 1
+                && *bit_ranges[0].bits.start() != 0
+                && bit_ranges[0].bits.start() == bit_ranges[0].bits.end()
+                && value.content == "1" =>
+            {
+                for base in ISABase::complement(isas) {
+                    instructions.push(Instruction {
+                        isa_module: ISAModule { base, extension },
+                        name: instruction_name.clone(),
+                        fields: fields.clone(),
+                    });
+                }
+                let mut found = false;
+                for field in &mut fields {
+                    match &mut field.field_def {
+                        FieldDef {
+                            body:
+                                FieldDefBody::Slice(FieldDefSlice {
+                                    name,
+                                    bit_ranges: bit_ranges2,
+                                }),
+                            excluded_values,
+                        } if name.matches_char_tokens(&field_name.content)
+                            && bit_ranges2.len() == 1
+                            && bit_ranges[0].bits == bit_ranges2[0].bits
+                            && excluded_values.is_empty() =>
+                        {
+                            found = true;
+                            field.field_def.body = FieldDefBody::LiteralNumber(ast::Number {
+                                content: "0".into(),
+                                pos: field_name.pos(),
+                            });
+                            break;
+                        }
+                        _ => {}
+                    }
+                }
+                err_if!(!found, self, field_name, "couldn't find matching field");
+                isas.to_vec()
+            }
+            [opcode_constraint!({ isas: isas1 }, ';'), opcode_constraint!({ isas: isas2 }), opcode_constraint!(HINT)] =>
+            {
+                for i in isas1 {
+                    err_if!(
+                        isas2.iter().find(|&v| v == i).is_some(),
+                        self,
+                        constraints[0].pos,
+                        "duplicate ISA bit-count"
+                    );
+                }
+                isas1.iter().chain(isas2).copied().collect()
+            }
+            [opcode_constraint!({ isas: isas1 }, ';'), opcode_constraint!({ isas: isas2 }), opcode_constraint!(RES)] =>
+            {
+                for i in isas1 {
+                    err_if!(
+                        isas2.iter().find(|&v| v == i).is_some(),
+                        self,
+                        constraints[0].pos,
+                        "duplicate ISA bit-count"
+                    );
+                }
+                isas1.to_vec()
+            }
+            [opcode_constraint!(HINT, ','), opcode_constraint!(
+                {
+                    {
+                        { reg_field_name, zero_denied: _ },
+                        reg_bit_ranges
+                    } == reg_value
+                }, ';'
+            ), opcode_constraint!({ isas: isas }), opcode_constraint!(NSE, ','), opcode_constraint!(
+                {
+                    {
+                        { imm_field_name, zero_denied: _ },
+                        imm_bit_ranges
+                    } == imm_value
+                }
+            )] if instruction_name.name == "C.SLLI"
+                && reg_bit_ranges.is_empty()
+                && reg_value.content == "0"
+                && imm_bit_ranges.len() == 1
+                && *imm_bit_ranges[0].bits.start() != 0
+                && imm_bit_ranges[0].bits.start() == imm_bit_ranges[0].bits.end()
+                && imm_value.content == "1" =>
+            {
+                for field in &mut fields {
+                    if field
+                        .field_def
+                        .body
+                        .find_matches_char_tokens(&reg_field_name.content)
+                        .is_none()
+                    {
+                        continue;
+                    }
+                    match &*field.field_def.excluded_values {
+                        [num] if num.content == "0" => {
+                            field.field_def.excluded_values = Vec::new();
+                        }
+                        _ => err!(self, &field.field_def, "unexpected field value"),
+                    }
+                }
+                for base in ISABase::complement(isas) {
+                    instructions.push(Instruction {
+                        isa_module: ISAModule { base, extension },
+                        name: instruction_name.clone(),
+                        fields: fields.clone(),
+                    });
+                }
+                let mut found = false;
+                for field in &mut fields {
+                    match &mut field.field_def {
+                        FieldDef {
+                            body:
+                                FieldDefBody::Slice(FieldDefSlice {
+                                    name,
+                                    bit_ranges: bit_ranges2,
+                                }),
+                            excluded_values,
+                        } if name.matches_char_tokens(&imm_field_name.content)
+                            && bit_ranges2.len() == 1
+                            && imm_bit_ranges[0].bits == bit_ranges2[0].bits
+                            && excluded_values.is_empty() =>
+                        {
+                            found = true;
+                            field.field_def.body = FieldDefBody::LiteralNumber(ast::Number {
+                                content: "0".into(),
+                                pos: imm_field_name.pos(),
+                            });
+                            break;
+                        }
+                        _ => {}
+                    }
+                }
+                err_if!(!found, self, imm_field_name, "couldn't find matching field");
+                isas.to_vec()
+            }
+            [opcode_constraint!({ isas: isas1 }, ';'), opcode_constraint!({ isas: isas2 }), opcode_constraint!(HINT, ';'), opcode_constraint!(HINT, ','), opcode_constraint!(
+                {
+                    {
+                        { field_name, zero_denied: _ },
+                        bit_ranges
+                    } == value
+                }
+            )] if instruction_name.name == "C.SLLI64"
+                && bit_ranges.is_empty()
+                && value.content == "0" =>
+            {
+                for field in &mut fields {
+                    if field
+                        .field_def
+                        .body
+                        .find_matches_char_tokens(&field_name.content)
+                        .is_none()
+                    {
+                        continue;
+                    }
+                    match &*field.field_def.excluded_values {
+                        [num] if num.content == "0" => {
+                            field.field_def.excluded_values = Vec::new();
+                        }
+                        _ => err!(self, &field.field_def, "unexpected field value"),
+                    }
+                }
+                for i in isas1 {
+                    err_if!(
+                        isas2.iter().find(|&v| v == i).is_some(),
+                        self,
+                        constraints[0].pos,
+                        "duplicate ISA bit-count"
+                    );
+                }
+                isas1.iter().chain(isas2).copied().collect()
+            }
+            [opcode_constraint!(RES, ','), opcode_constraint!(
+                {
+                    {
+                        { field_name, zero_denied: _ },
+                        bit_ranges
+                    } == value
+                }
+            )] if bit_ranges.is_empty() && value.content == "0" => {
+                let mut found = false;
+                for field in &mut fields {
+                    if field
+                        .field_def
+                        .body
+                        .find_matches_char_tokens(&field_name.content)
+                        .is_some()
+                        && field.field_def.excluded_values.len() == 1
+                        && field.field_def.excluded_values[0].content == "0"
+                    {
+                        found = true;
+                        break;
+                    }
+                }
+                err_if!(!found, self, field_name, "couldn't find matching field");
+                ISABase::VALUES.to_vec()
+            }
+            _ => err!(self, constraints[0].pos, "unrecognized constraint list"),
+        };
+        for base in bases {
+            instructions.push(Instruction {
+                isa_module: ISAModule { base, extension },
+                name: instruction_name.clone(),
+                fields: fields.clone(),
+            });
         }
         Ok(instructions)
     }
@@ -1594,6 +2061,15 @@ pub enum FieldDefName {
     CharTokens(ast::CharTokens, FieldZeroCondition),
 }
 
+impl FieldDefName {
+    pub fn matches_char_tokens(&self, search_for: &str) -> bool {
+        match self {
+            FieldDefName::CharTokens(v, _) if v.content == search_for => true,
+            _ => false,
+        }
+    }
+}
+
 impl GetPos for FieldDefName {
     fn pos(&self) -> ast::Pos {
         match self {
@@ -1648,6 +2124,30 @@ pub enum FieldDefBody {
     LiteralNumber(ast::Number),
 }
 
+impl FieldDefBody {
+    pub fn names(&self) -> &[FieldDefName] {
+        match self {
+            FieldDefBody::Alternate(v) => &v.names,
+            FieldDefBody::Slice(v) => slice::from_ref(&v.name),
+            FieldDefBody::Wildcard(_) => &[],
+            FieldDefBody::LiteralNumber(_) => &[],
+        }
+    }
+    pub fn names_mut(&mut self) -> &mut [FieldDefName] {
+        match self {
+            FieldDefBody::Alternate(v) => &mut v.names,
+            FieldDefBody::Slice(v) => slice::from_mut(&mut v.name),
+            FieldDefBody::Wildcard(_) => &mut [],
+            FieldDefBody::LiteralNumber(_) => &mut [],
+        }
+    }
+    pub fn find_matches_char_tokens(&self, search_for: &str) -> Option<&FieldDefName> {
+        self.names()
+            .iter()
+            .find(|name| name.matches_char_tokens(search_for))
+    }
+}
+
 impl GetPos for FieldDefBody {
     fn pos(&self) -> ast::Pos {
         match self {
@@ -1700,6 +2200,7 @@ pub enum OpcodeNameFieldConstraintBody {
     ISAs(Vec<ISABase>),
     FieldCondition {
         field: FieldDefSlice,
+        is_equality: bool,
         value: ast::Number,
     },
     Hint,
@@ -1818,6 +2319,22 @@ pub enum ISABase {
 
 impl ISABase {
     pub const VALUES: &'static [Self] = &[ISABase::RV32I, ISABase::RV64I];
+    pub fn complement(values: &[Self]) -> Vec<Self> {
+        let mut found = [false; Self::VALUES.len()];
+        for &value in values {
+            for (index, &value2) in Self::VALUES.iter().enumerate() {
+                if value == value2 {
+                    found[index] = true;
+                    break;
+                }
+            }
+        }
+        Self::VALUES
+            .iter()
+            .enumerate()
+            .filter_map(|(index, &value)| if found[index] { None } else { Some(value) })
+            .collect()
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
