@@ -6,9 +6,10 @@ pub use ast::parse;
 
 macro_rules! parse_path {
     ($path:expr, $table_name:expr) => {
-        ast::parse($path, include_str!($path), $table_name)
-            .map_err(|e| e.to_string())
-            .unwrap()
+        match ast::parse($path, include_str!($path), $table_name) {
+            Ok(v) => v,
+            Err(e) => panic!("{}", e),
+        }
     };
 }
 

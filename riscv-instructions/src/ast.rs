@@ -1523,25 +1523,37 @@ impl<'input> Parser<'input> {
         &self,
         row: Vec<ColumnRange>,
         column_definitions: &[ColumnDefinition],
+        isa_module_row: Option<ISAModule>,
     ) -> Result<Vec<Instruction>> {
-        let opcode = match row.first().expect("row already checked to be non-empty") {
+        let (opcode, column_pos) = match row.first().expect("row already checked to be non-empty") {
             ColumnRange {
                 body: Some(ColumnBody::OpcodeName(opcode)),
+                pos,
                 ..
-            } => opcode.clone(),
+            } => (opcode.clone(), *pos),
             column => err!(self, column.pos, "expected: opcode"),
         };
         let extension;
-        let bases;
-        match self.instr_table_name {
+        let bases = match self.instr_table_name {
             InstrTableName::InstrTable => {
-                todo!()
+                let isa_module_row = unwrap_or!(
+                    isa_module_row,
+                    err!(self, column_pos, "missing ISA module row")
+                );
+                extension = isa_module_row.extension;
+                match (&*opcode.name, isa_module_row.base) {
+                    ("SLLI", ISABase::RV32I)
+                    | ("SRLI", ISABase::RV32I)
+                    | ("SRAI", ISABase::RV32I) => vec![ISABase::RV32I],
+                    (_, ISABase::RV32I) => vec![ISABase::RV32I, ISABase::RV64I],
+                    (_, ISABase::RV64I) => vec![ISABase::RV64I],
+                }
             }
             InstrTableName::RvcInstrTable => {
                 extension = self.parse_rvc_isa_extension(&opcode)?;
-                bases = ISABase::VALUES.to_vec();
+                ISABase::VALUES.to_vec()
             }
-        }
+        };
         let OpcodeNameField {
             pos,
             name,
@@ -1901,6 +1913,111 @@ impl<'input> Parser<'input> {
         }
         Ok(instructions)
     }
+    fn stringify_isa_module_row_tokens(
+        &self,
+        tokens: &[ast::Token],
+        text: &mut String,
+    ) -> Result<()> {
+        for token in tokens {
+            match token {
+                ast::Token::Whitespace(_) => text.push(' '),
+                ast::Token::CharTokens(v) => text.push_str(&v.content),
+                ast::Token::Number(v) => text.push_str(&v.content),
+                ast::Token::Punctuation(v) => text.push(v.ch),
+                ast::Token::Macro(v) => {
+                    text.push('\\');
+                    text.push_str(&v.name.content);
+                }
+                ast::Token::Group(v) => {
+                    text.push('{');
+                    self.stringify_isa_module_row_tokens(&v.tokens, text)?;
+                    text.push('}');
+                }
+                _ => err!(self, token, "unexpected token: {:?}", token),
+            }
+        }
+        Ok(())
+    }
+    fn parse_isa_module_row(&self, row: &[ColumnRange]) -> Result<ISAModule> {
+        let column_body_bold_text = match row {
+            [ColumnRange {
+                body: Some(ColumnBody::ColumnBodyBoldText(v)),
+                ..
+            }, ColumnRange { body: None, .. }] => v,
+            [] => unreachable!("row already checked to be non-empty"),
+            [first, ..] => err!(
+                self,
+                first.body.as_ref().map_or(first.pos, GetPos::pos),
+                "expected `\\bf`"
+            ),
+        };
+        let mut text = String::new();
+        self.stringify_isa_module_row_tokens(&column_body_bold_text.tokens, &mut text)?;
+        Ok(match &*text {
+            "\\bf RV32I Base Instruction Set" => ISAModule {
+                base: ISABase::RV32I,
+                extension: ISAExtension::I,
+            },
+            "\\bf RV64I Base Instruction Set (in addition to RV32I)" => ISAModule {
+                base: ISABase::RV64I,
+                extension: ISAExtension::I,
+            },
+            "\\bf RV32/RV64 \\emph{Zifencei} Standard Extension" => ISAModule {
+                base: ISABase::RV32I,
+                extension: ISAExtension::Zifencei,
+            },
+            "\\bf RV32/RV64 \\emph{Zicsr} Standard Extension" => ISAModule {
+                base: ISABase::RV32I,
+                extension: ISAExtension::Zicsr,
+            },
+            "\\bf RV32M Standard Extension" => ISAModule {
+                base: ISABase::RV32I,
+                extension: ISAExtension::M,
+            },
+            "\\bf RV64M Standard Extension (in addition to RV32M)" => ISAModule {
+                base: ISABase::RV64I,
+                extension: ISAExtension::M,
+            },
+            "\\bf RV32A Standard Extension" => ISAModule {
+                base: ISABase::RV32I,
+                extension: ISAExtension::A,
+            },
+            "\\bf RV64A Standard Extension (in addition to RV32A)" => ISAModule {
+                base: ISABase::RV64I,
+                extension: ISAExtension::A,
+            },
+            "\\bf RV32F Standard Extension" => ISAModule {
+                base: ISABase::RV32I,
+                extension: ISAExtension::F,
+            },
+            "\\bf RV64F Standard Extension (in addition to RV32F)" => ISAModule {
+                base: ISABase::RV64I,
+                extension: ISAExtension::F,
+            },
+            "\\bf RV32D Standard Extension" => ISAModule {
+                base: ISABase::RV32I,
+                extension: ISAExtension::D,
+            },
+            "\\bf RV64D Standard Extension (in addition to RV32D)" => ISAModule {
+                base: ISABase::RV64I,
+                extension: ISAExtension::D,
+            },
+            "\\bf RV32Q Standard Extension" => ISAModule {
+                base: ISABase::RV32I,
+                extension: ISAExtension::Q,
+            },
+            "\\bf RV64Q Standard Extension (in addition to RV32Q)" => ISAModule {
+                base: ISABase::RV64I,
+                extension: ISAExtension::Q,
+            },
+            _ => err!(
+                self,
+                column_body_bold_text.pos,
+                "unrecognized ISA Module row: {:?}",
+                text
+            ),
+        })
+    }
     fn parse_instruction_set_section(
         &self,
         tabular_env: &ast::Environment,
@@ -1930,6 +2047,7 @@ impl<'input> Parser<'input> {
         self.parse_instruction_bit_ranges_row(&mut row_iterator, &column_definitions)?;
         let forms = self.parse_instruction_form_rows(&mut row_iterator, &column_definitions)?;
         let mut instructions = Vec::new();
+        let mut isa_module_row = None;
         for row in row_iterator {
             let row = row?;
             match &*row {
@@ -1937,12 +2055,16 @@ impl<'input> Parser<'input> {
                     body: Some(ColumnBody::Group(_)),
                     ..
                 }, ..]
-                | [ColumnRange { body: None, .. }, ColumnRange { body: None, .. }]
-                | [ColumnRange {
+                | [ColumnRange { body: None, .. }, ColumnRange { body: None, .. }] => continue,
+                [ColumnRange {
                     body: Some(ColumnBody::ColumnBodyBoldText(_)),
                     ..
-                }, ..] => continue,
-                _ => instructions.extend(self.parse_instruction(row, &column_definitions)?),
+                }, ..] => isa_module_row = Some(self.parse_isa_module_row(&row)?),
+                _ => instructions.extend(self.parse_instruction(
+                    row,
+                    &column_definitions,
+                    isa_module_row,
+                )?),
             }
         }
         Ok(InstructionSetSection {
