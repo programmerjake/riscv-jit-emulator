@@ -665,7 +665,7 @@ impl<'input> Parser<'input> {
         }
         let mut bit_ranges = Vec::new();
         loop {
-            let (end, end_bit_pos): (u32, _) = match tabular_body.next() {
+            let (end, end_bit_pos): (u8, _) = match tabular_body.next() {
                 Some(ast::Token::Number(num)) => {
                     (num.parse_with_err_arg(self, Self::err_pos)?, num.pos())
                 }
@@ -679,7 +679,7 @@ impl<'input> Parser<'input> {
                 tabular_body.clone().next()
             {
                 tabular_body.next();
-                let (start, start_bit_pos): (u32, _) = match tabular_body.next() {
+                let (start, start_bit_pos): (u8, _) = match tabular_body.next() {
                     Some(ast::Token::Number(num)) => {
                         (num.parse_with_err_arg(self, Self::err_pos)?, num.pos())
                     }
@@ -881,8 +881,8 @@ impl<'input> Parser<'input> {
             tokens.next();
             retval.push(match tokens.next() {
                 Some(ast::Token::Number(num)) => match &*num.content {
-                    "32" => ISABase::RV32I,
-                    "64" => ISABase::RV64I,
+                    "32" => ISABase::RV32,
+                    "64" => ISABase::RV64,
                     "128" => continue,
                     _ => err!(self, num, "invalid ISA bit-count: expected 32, 64, or 128"),
                 },
@@ -918,14 +918,14 @@ impl<'input> Parser<'input> {
             ast::Token::CharTokens(c) if c.content == "HINT" => OpcodeNameFieldConstraintBody::Hint,
             ast::Token::CharTokens(c) if c.content == "RV32" => {
                 OpcodeNameFieldConstraintBody::ISAs(self.parse_opcode_name_field_constraint_isas(
-                    Some(ISABase::RV32I),
+                    Some(ISABase::RV32),
                     tokens,
                     pos_after_body,
                 )?)
             }
             ast::Token::CharTokens(c) if c.content == "RV64" => {
                 OpcodeNameFieldConstraintBody::ISAs(self.parse_opcode_name_field_constraint_isas(
-                    Some(ISABase::RV64I),
+                    Some(ISABase::RV64),
                     tokens,
                     pos_after_body,
                 )?)
@@ -1542,11 +1542,11 @@ impl<'input> Parser<'input> {
                 );
                 extension = isa_module_row.extension;
                 match (&*opcode.name, isa_module_row.base) {
-                    ("SLLI", ISABase::RV32I)
-                    | ("SRLI", ISABase::RV32I)
-                    | ("SRAI", ISABase::RV32I) => vec![ISABase::RV32I],
-                    (_, ISABase::RV32I) => vec![ISABase::RV32I, ISABase::RV64I],
-                    (_, ISABase::RV64I) => vec![ISABase::RV64I],
+                    ("SLLI", ISABase::RV32) | ("SRLI", ISABase::RV32) | ("SRAI", ISABase::RV32) => {
+                        vec![ISABase::RV32]
+                    }
+                    (_, ISABase::RV32) => vec![ISABase::RV32, ISABase::RV64],
+                    (_, ISABase::RV64) => vec![ISABase::RV64],
                 }
             }
             InstrTableName::RvcInstrTable => {
@@ -1955,59 +1955,59 @@ impl<'input> Parser<'input> {
         self.stringify_isa_module_row_tokens(&column_body_bold_text.tokens, &mut text)?;
         Ok(match &*text {
             "\\bf RV32I Base Instruction Set" => ISAModule {
-                base: ISABase::RV32I,
+                base: ISABase::RV32,
                 extension: ISAExtension::I,
             },
             "\\bf RV64I Base Instruction Set (in addition to RV32I)" => ISAModule {
-                base: ISABase::RV64I,
+                base: ISABase::RV64,
                 extension: ISAExtension::I,
             },
             "\\bf RV32/RV64 \\emph{Zifencei} Standard Extension" => ISAModule {
-                base: ISABase::RV32I,
+                base: ISABase::RV32,
                 extension: ISAExtension::Zifencei,
             },
             "\\bf RV32/RV64 \\emph{Zicsr} Standard Extension" => ISAModule {
-                base: ISABase::RV32I,
+                base: ISABase::RV32,
                 extension: ISAExtension::Zicsr,
             },
             "\\bf RV32M Standard Extension" => ISAModule {
-                base: ISABase::RV32I,
+                base: ISABase::RV32,
                 extension: ISAExtension::M,
             },
             "\\bf RV64M Standard Extension (in addition to RV32M)" => ISAModule {
-                base: ISABase::RV64I,
+                base: ISABase::RV64,
                 extension: ISAExtension::M,
             },
             "\\bf RV32A Standard Extension" => ISAModule {
-                base: ISABase::RV32I,
+                base: ISABase::RV32,
                 extension: ISAExtension::A,
             },
             "\\bf RV64A Standard Extension (in addition to RV32A)" => ISAModule {
-                base: ISABase::RV64I,
+                base: ISABase::RV64,
                 extension: ISAExtension::A,
             },
             "\\bf RV32F Standard Extension" => ISAModule {
-                base: ISABase::RV32I,
+                base: ISABase::RV32,
                 extension: ISAExtension::F,
             },
             "\\bf RV64F Standard Extension (in addition to RV32F)" => ISAModule {
-                base: ISABase::RV64I,
+                base: ISABase::RV64,
                 extension: ISAExtension::F,
             },
             "\\bf RV32D Standard Extension" => ISAModule {
-                base: ISABase::RV32I,
+                base: ISABase::RV32,
                 extension: ISAExtension::D,
             },
             "\\bf RV64D Standard Extension (in addition to RV32D)" => ISAModule {
-                base: ISABase::RV64I,
+                base: ISABase::RV64,
                 extension: ISAExtension::D,
             },
             "\\bf RV32Q Standard Extension" => ISAModule {
-                base: ISABase::RV32I,
+                base: ISABase::RV32,
                 extension: ISAExtension::Q,
             },
             "\\bf RV64Q Standard Extension (in addition to RV32Q)" => ISAModule {
-                base: ISABase::RV64I,
+                base: ISABase::RV64,
                 extension: ISAExtension::Q,
             },
             _ => err!(
@@ -2145,12 +2145,12 @@ pub struct ColumnDefinition {
 #[derive(Debug, Clone)]
 pub struct InstBit {
     pub pos: ast::Pos,
-    pub bit: u32,
+    pub bit: u8,
 }
 
 #[derive(Debug, Clone)]
 pub struct InstBitRange {
-    pub bits: RangeInclusive<u32>,
+    pub bits: RangeInclusive<u8>,
     pub end_bit_pos: ast::Pos,
     pub start_bit_pos: ast::Pos,
 }
@@ -2167,7 +2167,7 @@ impl From<InstBit> for InstBitRange {
 
 #[derive(Debug, Clone)]
 pub struct FieldBitRange {
-    pub bits: RangeInclusive<u32>,
+    pub bits: RangeInclusive<u8>,
     pub end_bit_pos: ast::Pos,
     pub start_bit_pos: Option<ast::Pos>,
 }
@@ -2435,12 +2435,18 @@ pub struct InstructionForm {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum ISABase {
-    RV32I,
-    RV64I,
+    RV32,
+    RV64,
 }
 
 impl ISABase {
-    pub const VALUES: &'static [Self] = &[ISABase::RV32I, ISABase::RV64I];
+    pub const VALUES: &'static [Self] = &[ISABase::RV32, ISABase::RV64];
+    pub fn name(self) -> &'static str {
+        match self {
+            ISABase::RV32 => "RV32",
+            ISABase::RV64 => "RV64",
+        }
+    }
     pub fn complement(values: &[Self]) -> Vec<Self> {
         let mut found = [false; Self::VALUES.len()];
         for &value in values {
@@ -2470,6 +2476,33 @@ pub enum ISAExtension {
     C,
     Zifencei,
     Zicsr,
+}
+
+impl ISAExtension {
+    pub const VALUES: &'static [Self] = &[
+        Self::I,
+        Self::M,
+        Self::A,
+        Self::F,
+        Self::D,
+        Self::Q,
+        Self::C,
+        Self::Zifencei,
+        Self::Zicsr,
+    ];
+    pub fn name(self) -> &'static str {
+        match self {
+            Self::I => "I",
+            Self::M => "M",
+            Self::A => "A",
+            Self::F => "F",
+            Self::D => "D",
+            Self::Q => "Q",
+            Self::C => "C",
+            Self::Zifencei => "Zifencei",
+            Self::Zicsr => "Zicsr",
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
