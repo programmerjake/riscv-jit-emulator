@@ -1,17 +1,14 @@
 # SPDX-License-Identifier: LGPL-2.1-or-later
 # See Notices.txt for copyright information
 [package]
-name = "riscv-jit-emulator-proc-macro"
+name = "riscv-jit-emulator-instruction-parser-generator"
 version = "0.1.0"
 authors = ["Jacob Lifshay <programmerjake@gmail.com>"]
 edition = "2018"
 license = "LGPL-2.1-or-later"
 repository = "https://github.com/programmerjake/riscv-jit-emulator"
 publish = false
-description = "proc-macros for riscv-jit-emulator"
-
-[lib]
-proc-macro = true
+description = "instruction parser generator for riscv-jit-emulator"
 
 [dependencies]
 quote = "1.0"

@@ -13,14 +13,17 @@ exclude = ["/.vscode"]
 
 [dependencies]
 
-[dependencies.riscv-jit-emulator-proc-macro]
-path = "riscv-jit-emulator-proc-macro"
+[build-dependencies]
+which = "3"
+
+[build-dependencies.riscv-jit-emulator-instruction-parser-generator]
+path = "riscv-jit-emulator-instruction-parser-generator"
 version = "=0.1.0"
 
 [workspace]
 members = [
     ".",
     "tex-parser",
-    "riscv-jit-emulator-proc-macro",
+    "riscv-jit-emulator-instruction-parser-generator",
     "riscv-instructions",
 ]

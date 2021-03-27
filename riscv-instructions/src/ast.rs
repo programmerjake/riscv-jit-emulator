@@ -5,7 +5,6 @@ use once_cell::unsync::OnceCell;
 use peg::{str::LineCol, Parse};
 use std::{
     borrow::Cow,
-    cell::Cell,
     error::Error,
     fmt, mem,
     num::NonZeroUsize,
@@ -756,8 +755,20 @@ impl<'input> Parser<'input> {
     ) -> Result<FieldDef> {
         match first_token {
             ast::Token::Number(num) => {
+                if let Err(e) = u128::from_str_radix(&num.content, 2) {
+                    if num.content == "2" {
+                        return Ok(FieldDef {
+                            body: FieldDefBody::LiteralBinaryNumber(ast::Number {
+                                pos: num.pos,
+                                content: "10".into(),
+                            }),
+                            excluded_values: Vec::new(),
+                        });
+                    }
+                    err!(self, num, "{}", e);
+                }
                 return Ok(FieldDef {
-                    body: FieldDefBody::LiteralNumber(num.clone()),
+                    body: FieldDefBody::LiteralBinaryNumber(num.clone()),
                     excluded_values: Vec::new(),
                 });
             }
@@ -1093,7 +1104,7 @@ impl<'input> Parser<'input> {
         &self,
         tabular_body: &mut std::slice::Iter<ast::Token>,
         pos_after_body: impl GetPos,
-        column_definitions: &[ColumnDefinition],
+        _column_definitions: &[ColumnDefinition],
         is_top_level: bool,
         is_field_column: bool,
         is_opcode_column: bool,
@@ -1367,7 +1378,7 @@ impl<'input> Parser<'input> {
         };
         let field_matches_name_or_num = |name: &str, num_len: usize| -> bool {
             field_def.only_char_tokens().map(|v| &*v.content) == Some(name)
-                || matches!(&field_def.body, FieldDefBody::LiteralNumber(num) if num.content.len() == num_len)
+                || matches!(&field_def.body, FieldDefBody::LiteralBinaryNumber(num) if num.content.len() == num_len)
         };
         if is_fence_instruction_form {
             let bits = match column.indexes {
@@ -1731,7 +1742,7 @@ impl<'input> Parser<'input> {
                             && excluded_values.is_empty() =>
                         {
                             found = true;
-                            field.field_def.body = FieldDefBody::LiteralNumber(ast::Number {
+                            field.field_def.body = FieldDefBody::LiteralBinaryNumber(ast::Number {
                                 content: "0".into(),
                                 pos: field_name.pos(),
                             });
@@ -1828,7 +1839,7 @@ impl<'input> Parser<'input> {
                             && excluded_values.is_empty() =>
                         {
                             found = true;
-                            field.field_def.body = FieldDefBody::LiteralNumber(ast::Number {
+                            field.field_def.body = FieldDefBody::LiteralBinaryNumber(ast::Number {
                                 content: "0".into(),
                                 pos: imm_field_name.pos(),
                             });
@@ -2190,6 +2201,12 @@ impl FieldDefName {
             _ => false,
         }
     }
+    pub fn zero_denied(&self) -> bool {
+        match self {
+            FieldDefName::Macro(_) => false,
+            FieldDefName::CharTokens(_, v) => v.zero_denied,
+        }
+    }
 }
 
 impl GetPos for FieldDefName {
@@ -2243,7 +2260,7 @@ pub enum FieldDefBody {
     Alternate(FieldDefAlternate),
     Slice(FieldDefSlice),
     Wildcard(Wildcard),
-    LiteralNumber(ast::Number),
+    LiteralBinaryNumber(ast::Number),
 }
 
 impl FieldDefBody {
@@ -2252,7 +2269,7 @@ impl FieldDefBody {
             FieldDefBody::Alternate(v) => &v.names,
             FieldDefBody::Slice(v) => slice::from_ref(&v.name),
             FieldDefBody::Wildcard(_) => &[],
-            FieldDefBody::LiteralNumber(_) => &[],
+            FieldDefBody::LiteralBinaryNumber(_) => &[],
         }
     }
     pub fn names_mut(&mut self) -> &mut [FieldDefName] {
@@ -2260,7 +2277,7 @@ impl FieldDefBody {
             FieldDefBody::Alternate(v) => &mut v.names,
             FieldDefBody::Slice(v) => slice::from_mut(&mut v.name),
             FieldDefBody::Wildcard(_) => &mut [],
-            FieldDefBody::LiteralNumber(_) => &mut [],
+            FieldDefBody::LiteralBinaryNumber(_) => &mut [],
         }
     }
     pub fn find_matches_char_tokens(&self, search_for: &str) -> Option<&FieldDefName> {
@@ -2276,7 +2293,7 @@ impl GetPos for FieldDefBody {
             FieldDefBody::Alternate(v) => v.pos(),
             FieldDefBody::Slice(v) => v.pos(),
             FieldDefBody::Wildcard(v) => v.pos(),
-            FieldDefBody::LiteralNumber(v) => v.pos(),
+            FieldDefBody::LiteralBinaryNumber(v) => v.pos(),
         }
     }
 }
