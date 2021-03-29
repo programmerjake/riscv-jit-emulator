@@ -202,18 +202,18 @@ impl DecoderInput {
                     let bit_width = field_descriptor.bit_width;
                     fields.push(quote! {
                         #[doc = #field_name_str]
-                        pub #name: BitVec<#bit_width>,
+                        pub #name: BitArray<#bit_width>,
                     });
                     for exclusion in &field_descriptor.exclusions {
                         let exclusion = Literal::u32_unsuffixed(*exclusion);
                         parse_check_field_exclusions.push(quote! {
-                            if #name.0 == #exclusion {
+                            if *#name.underlying() == #exclusion {
                                 return None;
                             }
                         });
                     }
                     parse_return_fields.push(quote! {#name,});
-                    parse_declare_fields.push(quote! {let mut #name = BitVec::default();});
+                    parse_declare_fields.push(quote! {let mut #name = BitArray::new_unchecked(0);});
                 }
                 match &field.field_def.body {
                     ast::FieldDefBody::Alternate(a) => {
@@ -221,7 +221,7 @@ impl DecoderInput {
                             let name =
                                 name_to_ident("", get_field_name_str(name), IdentKind::VarOrField);
                             parse_fields.push(quote! {
-                                #name.0 = fields.#field_index_lit as _;
+                                #name = BitArray::new_unchecked(fields.#field_index_lit as _);
                             });
                         }
                     }
@@ -238,7 +238,9 @@ impl DecoderInput {
                                 IdentKind::VarOrField,
                             );
                             parse_fields.push(quote! {
-                                #name.0 = (#name.0 as u32 | (((fields.#field_index_lit >> #shift1) as u32 & ((1 << #mask_width) - 1)) << #shift2)) as _;
+                                #name = BitArray::new_unchecked(
+                                    (*#name.underlying() as u32 | (((fields.#field_index_lit >> #shift1) as u32 & ((1 << #mask_width) - 1)) << #shift2)) as _
+                                );
                             });
                         }
                     }
@@ -274,15 +276,26 @@ impl DecoderInput {
                     }
                 }
 
-                impl ParseInstruction for #struct_name {
-                    const LENGTH: usize = #instruction_length;
-                    fn parse(bytes: [u8; Instruction::MAX_LENGTH]) -> Option<Self> {
+                impl #struct_name {
+                    pub const BYTE_LENGTH: usize = #instruction_length;
+                    pub const fn parse(bytes: &[u8]) -> Option<Self> {
+                        #![allow(unused_assignments)]
+                        if bytes.len() < Self::BYTE_LENGTH {
+                            return None;
+                        }
                         let bits = #instruction_bits_type::from_le_bytes([#(#bytes,)*]);
                         let fields = (#(#parse_instruction_fields),*);
                         #(#parse_declare_fields)*
                         #(#parse_fields)*
                         #(#parse_check_field_exclusions)*
                         Some(#struct_name {#(#parse_return_fields)*})
+                    }
+                }
+
+                impl ParseInstruction for #struct_name {
+                    const BYTE_LENGTH: usize = #struct_name::BYTE_LENGTH;
+                    fn parse(bytes: &[u8]) -> Option<Self> {
+                        #struct_name::parse(bytes)
                     }
                 }
             });
@@ -292,7 +305,7 @@ impl DecoderInput {
             });
             instruction_parse_calls.push(quote! {
                 if let Some(retval) = #struct_name::parse(bytes) {
-                    return Some(retval.into());
+                    return Some(Self::#struct_name(retval));
                 }
             });
         }
@@ -306,8 +319,8 @@ impl DecoderInput {
 
             impl Instruction {
                 /// max instruction length in bytes
-                pub const MAX_LENGTH: usize = #max_instruction_length;
-                pub fn parse(bytes: [u8; Instruction::MAX_LENGTH]) -> Option<Self> {
+                pub const MAX_BYTE_LENGTH: usize = #max_instruction_length;
+                pub const fn parse(bytes: &[u8]) -> Option<Self> {
                     #(#instruction_parse_calls)*
                     None
                 }
