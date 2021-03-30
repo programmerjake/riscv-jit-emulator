@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: LGPL-2.1-or-later
 // See Notices.txt for copyright information
 
-use std::{
+use core::{
     cmp::Ordering,
     fmt,
     hash::{Hash, Hasher},
