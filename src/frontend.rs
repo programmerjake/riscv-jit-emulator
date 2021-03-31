@@ -1,8 +1,13 @@
 // SPDX-License-Identifier: LGPL-2.1-or-later
 // See Notices.txt for copyright information
 
-use alloc::{collections::BTreeSet, format, string::String, vec::Vec};
-use core::fmt;
+use alloc::{boxed::Box, collections::BTreeSet, format, string::String, vec::Vec};
+use core::{
+    cmp,
+    convert::{TryFrom, TryInto},
+    fmt,
+    ops::{Deref, Range},
+};
 use goblin::elf::{header, program_header, Elf, Reloc};
 use std::dbg;
 
@@ -14,7 +19,7 @@ pub enum ParseError {
 
 macro_rules! make_error {
     ($($msg:tt)*) => {
-        ParseError::Error(format!($($msg)*))
+        ParseError::Error(alloc::format!($($msg)*))
     };
 }
 
@@ -39,6 +44,8 @@ macro_rules! unwrap_or_error {
     };
 }
 
+mod memory_map;
+
 impl From<goblin::error::Error> for ParseError {
     fn from(e: goblin::error::Error) -> Self {
         Self::ElfError(e)
@@ -56,25 +63,8 @@ impl fmt::Display for ParseError {
 
 type ParseResult<T> = Result<T, ParseError>;
 
-#[derive(Copy, Clone)]
-struct Relocation(Reloc);
-
-struct LoadedPage<'a> {
-    relocations: BTreeSet<Relocation>,
-    data: &'a [u8],
-}
-
-enum PageData<'a> {
-    Loaded(LoadedPage<'a>),
-    Zeroed,
-}
-
-struct Page<'a> {
-    data: PageData<'a>,
-}
-
 pub struct Binary<'a> {
-    memory_map: Vec<Option<Page<'a>>>,
+    memory_map: memory_map::MemoryMap<'a>,
 }
 
 impl<'a> Binary<'a> {
