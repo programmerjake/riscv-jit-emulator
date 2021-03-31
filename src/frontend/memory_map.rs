@@ -345,8 +345,8 @@ impl<'a> MemoryMap<'a> {
     /// reference implementation of `map_range_to_bytes`
     fn map_range_to_bytes_reference(
         &mut self,
-        mut address_range: Range<u64>,
-        mut bytes: &'a [u8],
+        address_range: Range<u64>,
+        bytes: &'a [u8],
     ) -> ParseResult<()> {
         assert!(address_range.start <= address_range.end);
         if address_range.end > Page::ADDRESS_LIMIT {
@@ -360,10 +360,11 @@ impl<'a> MemoryMap<'a> {
         for (index, address) in address_range.enumerate() {
             let PageIndexAndOffset { page_index, offset } = Page::page_index_and_offset(address)?;
             self.expand_pages_to_include(page_index);
-            let Page { ref mut data } = self.pages[page_index].take().unwrap_or(Page {
+            let mut page = self.pages[page_index].take().unwrap_or(Page {
                 data: Page::ZERO_PAGE_DATA,
             });
-            data.to_mut()[offset] = bytes.get(index).copied().unwrap_or(0);
+            page.data.to_mut()[offset] = bytes.get(index).copied().unwrap_or(0);
+            self.pages[page_index] = Some(page);
         }
         Ok(())
     }
@@ -371,19 +372,78 @@ impl<'a> MemoryMap<'a> {
 
 #[cfg(test)]
 mod test {
-    use super::MemoryMap;
+    use super::{MemoryMap, Page};
+    use alloc::vec::Vec;
+    use std::dbg;
 
     #[test]
     fn test_map() {
-        for &page0_mapped in &[false, true] {
-            for &page1_mapped in &[false, true] {
-                for &page2_mapped in &[false, true] {
-                    todo!("finish implementing test for map_range_to_bytes");
-                    let mut memory_map = MemoryMap::new();
-                    /*if page0_mapped {
-                        memory_map.map_range_to_bytes_reference(address_range, bytes)
+        const STEP: usize = Page::SIZE / 4;
+        const LEN: usize = 3 * Page::SIZE;
+        let old_page_data: Vec<u8> = (0..LEN)
+            .map(|i| 0x10 | ((i * 0x12345) >> 16) as u8 & 0xF)
+            .collect();
+        let bytes: Vec<u8> = (0..LEN)
+            .map(|i| 0x20 | ((i * 0x12327) >> 16) as u8 & 0xF)
+            .collect();
+        for &page0_index in &[None, Some(0)] {
+            for &page1_index in &[None, Some(1)] {
+                for &page2_index in &[None, Some(2)] {
+                    for map_start_address in (0..LEN).step_by(STEP) {
+                        for map_end_address in (map_start_address..LEN).step_by(STEP) {
+                            for bytes_len in (0..LEN).step_by(STEP) {
+                                let mut memory_map = MemoryMap::new();
+                                for page_index in page0_index
+                                    .into_iter()
+                                    .chain(page1_index)
+                                    .chain(page2_index)
+                                {
+                                    dbg!(page_index);
+                                    let range_start = page_index * Page::SIZE;
+                                    let range_end = range_start + Page::SIZE;
+                                    memory_map
+                                        .map_range_to_bytes_reference(
+                                            range_start as u64..range_end as u64,
+                                            &old_page_data[range_start..range_end],
+                                        )
+                                        .unwrap();
+                                }
+                                let mut reference_memory_map = memory_map.clone();
+                                let address_range =
+                                    map_start_address as u64..map_end_address as u64;
+                                dbg!(&address_range);
+                                dbg!(bytes_len);
+                                memory_map
+                                    .map_range_to_bytes(address_range.clone(), &bytes[..bytes_len])
+                                    .unwrap();
+                                reference_memory_map
+                                    .map_range_to_bytes_reference(
+                                        address_range,
+                                        &bytes[..bytes_len],
+                                    )
+                                    .unwrap();
+                                for page_index in
+                                    0..memory_map.pages.len().max(reference_memory_map.pages.len())
+                                {
+                                    dbg!(page_index);
+                                    let page = memory_map
+                                        .pages
+                                        .get(page_index)
+                                        .and_then(|v| v.as_ref())
+                                        .map(|v| &*v.data);
+                                    let reference_page = reference_memory_map
+                                        .pages
+                                        .get(page_index)
+                                        .and_then(|v| v.as_ref())
+                                        .map(|v| &*v.data);
+                                    assert_eq!(page, reference_page);
+                                }
+                                if bytes_len > map_end_address - map_start_address {
+                                    break;
+                                }
+                            }
+                        }
                     }
-                    let mut reference_memory_map = memory_map.clone();*/
                 }
             }
         }
