@@ -5,6 +5,7 @@ use super::{ParseError, ParseResult};
 use alloc::{boxed::Box, vec::Vec};
 use core::{
     convert::TryInto,
+    fmt,
     ops::{Deref, Range},
 };
 
@@ -19,10 +20,68 @@ impl From<AddressUnmapped> for ParseError {
     }
 }
 
-#[derive(Debug, Clone)]
+struct DebugPageRow<'a> {
+    address: u64,
+    bytes: &'a [u8],
+}
+
+impl fmt::Debug for DebugPageRow<'_> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "0x{:04X}:", self.address)?;
+        for (index, &byte) in self.bytes.iter().enumerate() {
+            if index != 0 && index % 8 == 0 {
+                write!(f, " ")?;
+            }
+            write!(f, " {:02X}", byte)?;
+        }
+        Ok(())
+    }
+}
+
+struct DebugPageData<'a> {
+    address: u64,
+    bytes: &'a [u8; Page::SIZE],
+}
+
+impl DebugPageData<'_> {
+    fn debug_fmt(&self, debug_list: &mut fmt::DebugList<'_, '_>) {
+        const ROW_SIZE: usize = 0x20;
+        for offset in (0..Page::SIZE).step_by(ROW_SIZE) {
+            debug_list.entry(&DebugPageRow {
+                address: offset as u64 + self.address,
+                bytes: &self.bytes[offset..][..ROW_SIZE],
+            });
+        }
+    }
+}
+
+impl fmt::Debug for DebugPageData<'_> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let mut debug_list = f.debug_list();
+        self.debug_fmt(&mut debug_list);
+        debug_list.finish()
+    }
+}
+
+#[derive(Clone)]
 pub(crate) enum PageData<'a> {
     Borrowed(&'a [u8; Page::SIZE]),
     Owned(Box<[u8; Page::SIZE]>),
+}
+
+impl fmt::Debug for PageData<'_> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            &Self::Borrowed(bytes) => f
+                .debug_tuple("Borrowed")
+                .field(&DebugPageData { address: 0, bytes })
+                .finish(),
+            Self::Owned(bytes) => f
+                .debug_tuple("Owned")
+                .field(&DebugPageData { address: 0, bytes })
+                .finish(),
+        }
+    }
 }
 
 impl<'a> PageData<'a> {
@@ -129,9 +188,40 @@ impl<'a> Page<'a> {
     }
 }
 
-#[derive(Debug, Clone)]
+struct DebugMemoryMapPages<'a> {
+    pages: &'a [Option<Page<'a>>],
+}
+
+impl fmt::Debug for DebugMemoryMapPages<'_> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let mut debug_list = f.debug_list();
+        for (page_index, bytes) in self
+            .pages
+            .iter()
+            .enumerate()
+            .flat_map(|(index, page)| Some((index, &*page.as_ref()?.data)))
+        {
+            DebugPageData {
+                address: page_index as u64 * Page::SIZE as u64,
+                bytes,
+            }
+            .debug_fmt(&mut debug_list);
+        }
+        debug_list.finish()
+    }
+}
+
+#[derive(Clone)]
 pub(crate) struct MemoryMap<'a> {
     pages: Vec<Option<Page<'a>>>,
+}
+
+impl fmt::Debug for MemoryMap<'_> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("MemoryMap")
+            .field("pages", &DebugMemoryMapPages { pages: &self.pages })
+            .finish()
+    }
 }
 
 impl<'a> MemoryMap<'a> {
@@ -266,37 +356,54 @@ impl<'a> MemoryMap<'a> {
         }
         Ok(())
     }
-    pub(crate) fn read_fully(
-        &self,
-        mut address: u64,
-        mut data: &mut [u8],
-    ) -> Result<(), AddressUnmapped> {
+    /// reads bytes into `data` until we hit an unmapped page
+    #[must_use]
+    pub(crate) fn read_till_unmapped(&self, mut address: u64, mut data: &mut [u8]) -> usize {
         if data.is_empty() {
-            return Ok(());
+            return 0;
         }
         let PageIndexAndOffset {
             page_index,
             mut offset,
-        } = Page::page_index_and_offset(address)?;
+        } = match Page::page_index_and_offset(address) {
+            Ok(v) => v,
+            Err(_) => return 0,
+        };
+        let mut retval = 0;
         for page_index in page_index.. {
-            let page = self
+            if let Some(page) = self
                 .pages
                 .get(page_index)
                 .and_then(Option::as_ref)
                 .map(|v| &*v.data)
-                .ok_or(AddressUnmapped { address })?;
-            let rest_of_page = &page[offset..];
-            if data.len() <= rest_of_page.len() {
-                data.copy_from_slice(&rest_of_page[..data.len()]);
+            {
+                let rest_of_page = &page[offset..];
+                if data.len() <= rest_of_page.len() {
+                    data.copy_from_slice(&rest_of_page[..data.len()]);
+                    retval += data.len();
+                    break;
+                }
+                let (data_current, data_rest) = data.split_at_mut(rest_of_page.len());
+                data_current.copy_from_slice(rest_of_page);
+                retval += data_current.len();
+                data = data_rest;
+                address += rest_of_page.len() as u64;
+                offset = 0;
+            } else {
                 break;
             }
-            let (data_current, data_rest) = data.split_at_mut(rest_of_page.len());
-            data_current.copy_from_slice(rest_of_page);
-            data = data_rest;
-            address += rest_of_page.len() as u64;
-            offset = 0;
         }
-        Ok(())
+        retval
+    }
+    pub(crate) fn read_fully(&self, address: u64, data: &mut [u8]) -> Result<(), AddressUnmapped> {
+        let read_length = self.read_till_unmapped(address, data);
+        if read_length != data.len() {
+            Err(AddressUnmapped {
+                address: address + (data.len() - read_length) as u64,
+            })
+        } else {
+            Ok(())
+        }
     }
     pub(crate) fn write_fully(
         &mut self,

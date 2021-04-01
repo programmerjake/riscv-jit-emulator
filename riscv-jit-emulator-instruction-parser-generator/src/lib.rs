@@ -104,6 +104,7 @@ impl DecoderInput {
         let mut instructions = Vec::new();
         let mut instruction_enumerants = Vec::new();
         let mut instruction_parse_calls = Vec::new();
+        let mut instruction_length_match_arms = Vec::new();
         let mut max_instruction_length = 0;
         for instruction in parse_instructions() {
             match instruction.isa_module.base {
@@ -308,6 +309,9 @@ impl DecoderInput {
                     return Some(Self::#struct_name(retval));
                 }
             });
+            instruction_length_match_arms.push(quote! {
+                Self::#struct_name(_) => #struct_name::BYTE_LENGTH,
+            });
         }
         Ok(quote! {
             #(#instructions)*
@@ -323,6 +327,11 @@ impl DecoderInput {
                 pub const fn parse(bytes: &[u8]) -> Option<Self> {
                     #(#instruction_parse_calls)*
                     None
+                }
+                pub const fn byte_length(self) -> usize {
+                    match self {
+                        #(#instruction_length_match_arms)*
+                    }
                 }
             }
         })

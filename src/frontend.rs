@@ -9,7 +9,9 @@ use core::{
     ops::{Deref, Range},
 };
 use goblin::elf::{header, program_header, Elf, Reloc};
-use std::dbg;
+use instruction_iterator::InstructionIterator;
+use memory_map::MemoryMap;
+use std::{dbg, println};
 
 #[derive(Debug)]
 pub enum ParseError {
@@ -44,6 +46,7 @@ macro_rules! unwrap_or_error {
     };
 }
 
+mod instruction_iterator;
 mod memory_map;
 
 impl From<goblin::error::Error> for ParseError {
@@ -64,10 +67,22 @@ impl fmt::Display for ParseError {
 type ParseResult<T> = Result<T, ParseError>;
 
 pub struct Binary<'a> {
-    memory_map: memory_map::MemoryMap<'a>,
+    memory_map: MemoryMap<'a>,
 }
 
 impl<'a> Binary<'a> {
+    fn get_program_header_virtual_address_range(
+        program_header: &program_header::ProgramHeader,
+    ) -> Option<Range<u64>> {
+        Some(program_header.p_vaddr..program_header.p_vaddr.checked_add(program_header.p_memsz)?)
+    }
+    fn get_program_header_file_range(
+        program_header: &program_header::ProgramHeader,
+    ) -> Option<Range<usize>> {
+        let start = program_header.p_offset.try_into().ok()?;
+        let len = program_header.p_filesz.try_into().ok()?;
+        Some(start..start.checked_add(len)?)
+    }
     pub fn parse(bytes: &'a [u8]) -> ParseResult<Self> {
         let elf = Elf::parse(bytes)?;
         match_or_error!((elf.is_64,elf.little_endian), (true, true) => (), "unsupported ELF type: expected 64-bit little-endian ELF");
@@ -76,12 +91,29 @@ impl<'a> Binary<'a> {
         let interpreter = unwrap_or_error!(elf.interpreter, "PT_INTERP program header not found");
         match_or_error!(interpreter, "/lib/ld-linux-riscv64-lp64d.so.1" => (), "unsupported ELF interpreter");
         let dynamic = unwrap_or_error!(&elf.dynamic, "missing ELF dynamic section");
+        let mut memory_map = MemoryMap::new();
         for program_header in &elf.program_headers {
             if program_header.p_type != program_header::PT_LOAD {
                 continue;
             }
-            dbg!(program_header);
+            let address_range = unwrap_or_error!(
+                Self::get_program_header_virtual_address_range(program_header),
+                "invalid PT_LOAD program header virtual address range"
+            );
+            let bytes = unwrap_or_error!(
+                Self::get_program_header_file_range(program_header).and_then(|v| bytes.get(v)),
+                "invalid PT_LOAD program header file byte range"
+            );
+            memory_map.map_range_to_bytes(address_range, bytes)?;
         }
+        dbg!(&memory_map);
+        for (address, instruction) in (InstructionIterator {
+            address: elf.header.e_entry,
+            memory_map: &memory_map,
+        }) {
+            println!("0x{:04X}: {:?}", address, instruction);
+        }
+        dbg!(&elf.dynsyms);
         todo!()
     }
 }
