@@ -86,7 +86,7 @@ impl<'a> Binary<'a> {
     pub fn parse(bytes: &'a [u8]) -> ParseResult<Self> {
         let elf = Elf::parse(bytes)?;
         match_or_error!((elf.is_64,elf.little_endian), (true, true) => (), "unsupported ELF type: expected 64-bit little-endian ELF");
-        match_or_error!(elf.header.e_type, header::ET_EXEC => (), "unsupported ELF type: {:?}", header::et_to_str(elf.header.e_type));
+        match_or_error!(elf.header.e_type, header::ET_EXEC | header::ET_DYN => (), "unsupported ELF type: {:?}", header::et_to_str(elf.header.e_type));
         match_or_error!(elf.header.e_machine, header::EM_RISCV => (), "unsupported ELF machine: 0x{:x}", elf.header.e_machine);
         let interpreter = unwrap_or_error!(elf.interpreter, "PT_INTERP program header not found");
         match_or_error!(interpreter, "/lib/ld-linux-riscv64-lp64d.so.1" => (), "unsupported ELF interpreter");

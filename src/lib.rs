@@ -8,3 +8,4 @@ extern crate std;
 pub mod bit_array;
 pub mod decoder;
 pub mod frontend;
+pub mod virtual_filesystem;
