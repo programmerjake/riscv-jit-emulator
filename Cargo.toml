@@ -13,6 +13,7 @@ exclude = ["/.vscode"]
 
 [dependencies]
 goblin = { version = "0.3.4", default-features = false, features = ["elf32", "elf64", "alloc", "endian_fd"] }
+twoway = { version = "0.2.1", default-features = false, features = [] }
 
 [build-dependencies]
 which = "3"

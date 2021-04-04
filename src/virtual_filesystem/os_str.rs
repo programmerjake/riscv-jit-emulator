@@ -11,9 +11,116 @@ use core::{
     borrow::{Borrow, BorrowMut},
     cmp::Ordering,
     fmt, iter, mem,
-    ops::{Deref, DerefMut},
-    slice, str,
+    ops::{Deref, DerefMut, Index, IndexMut, Range, RangeBounds},
+    slice::{self, SliceIndex},
+    str,
 };
+
+mod sealed {
+    pub trait SealedPattern {}
+}
+
+pub trait Pattern: sealed::SealedPattern + Sized {
+    fn find(haystack: &[u8], needle: Self) -> Option<usize>;
+    fn rfind(haystack: &[u8], needle: Self) -> Option<usize>;
+    fn strip_prefix(haystack: &[u8], needle: Self) -> Option<&[u8]>;
+    fn strip_suffix(haystack: &[u8], needle: Self) -> Option<&[u8]>;
+}
+
+impl<T: FnMut(u8) -> bool> sealed::SealedPattern for T {}
+
+impl<T: FnMut(u8) -> bool> Pattern for T {
+    fn find(haystack: &[u8], needle: Self) -> Option<usize> {
+        haystack.iter().copied().position(needle)
+    }
+    fn rfind(haystack: &[u8], needle: Self) -> Option<usize> {
+        haystack.iter().copied().rposition(needle)
+    }
+    fn strip_prefix(haystack: &[u8], mut needle: Self) -> Option<&[u8]> {
+        match haystack.split_first() {
+            Some((&first, retval)) if needle(first) => Some(retval),
+            _ => None,
+        }
+    }
+    fn strip_suffix(haystack: &[u8], mut needle: Self) -> Option<&[u8]> {
+        match haystack.split_last() {
+            Some((&first, retval)) if needle(first) => Some(retval),
+            _ => None,
+        }
+    }
+}
+
+impl sealed::SealedPattern for u8 {}
+
+impl Pattern for u8 {
+    fn find(haystack: &[u8], needle: Self) -> Option<usize> {
+        Pattern::find(haystack, |v| v == needle)
+    }
+
+    fn rfind(haystack: &[u8], needle: Self) -> Option<usize> {
+        Pattern::rfind(haystack, |v| v == needle)
+    }
+
+    fn strip_prefix(haystack: &[u8], needle: Self) -> Option<&[u8]> {
+        Pattern::strip_prefix(haystack, |v| v == needle)
+    }
+
+    fn strip_suffix(haystack: &[u8], needle: Self) -> Option<&[u8]> {
+        Pattern::strip_suffix(haystack, |v| v == needle)
+    }
+}
+
+impl sealed::SealedPattern for &'_ OsStr {}
+
+impl Pattern for &'_ OsStr {
+    fn find(haystack: &[u8], needle: Self) -> Option<usize> {
+        twoway::find_bytes(haystack, &needle.0)
+    }
+
+    fn rfind(haystack: &[u8], needle: Self) -> Option<usize> {
+        twoway::rfind_bytes(haystack, &needle.0)
+    }
+
+    fn strip_prefix(haystack: &[u8], needle: Self) -> Option<&[u8]> {
+        haystack.strip_prefix(&needle.0)
+    }
+
+    fn strip_suffix(haystack: &[u8], needle: Self) -> Option<&[u8]> {
+        haystack.strip_suffix(&needle.0)
+    }
+}
+
+macro_rules! impl_pattern_for_string_like {
+    ($ty:ty) => {
+        impl sealed::SealedPattern for $ty {}
+
+        impl Pattern for $ty {
+            fn find(haystack: &[u8], needle: Self) -> Option<usize> {
+                let needle: &OsStr = needle.as_ref();
+                Pattern::find(haystack, needle)
+            }
+            fn rfind(haystack: &[u8], needle: Self) -> Option<usize> {
+                let needle: &OsStr = needle.as_ref();
+                Pattern::rfind(haystack, needle)
+            }
+            fn strip_prefix(haystack: &[u8], needle: Self) -> Option<&[u8]> {
+                let needle: &OsStr = needle.as_ref();
+                Pattern::strip_prefix(haystack, needle)
+            }
+            fn strip_suffix(haystack: &[u8], needle: Self) -> Option<&[u8]> {
+                let needle: &OsStr = needle.as_ref();
+                Pattern::strip_suffix(haystack, needle)
+            }
+        }
+    };
+}
+
+impl_pattern_for_string_like!(&'_ mut OsStr);
+impl_pattern_for_string_like!(&'_ str);
+impl_pattern_for_string_like!(&'_ mut str);
+impl_pattern_for_string_like!(Box<OsStr>);
+impl_pattern_for_string_like!(String);
+impl_pattern_for_string_like!(OsString);
 
 #[derive(PartialEq, Eq, PartialOrd, Ord, Hash)]
 #[repr(transparent)]
@@ -61,6 +168,54 @@ impl OsStr {
     }
     pub fn bytes(&self) -> iter::Copied<slice::Iter<'_, u8>> {
         self.as_bytes().iter().copied()
+    }
+    pub fn starts_with<T: Pattern>(&self, needle: T) -> bool {
+        self.strip_prefix(needle).is_some()
+    }
+    pub fn ends_with<T: Pattern>(&self, needle: T) -> bool {
+        self.strip_suffix(needle).is_some()
+    }
+    pub fn get<I: SliceIndex<[u8], Output = [u8]>>(&self, index: I) -> Option<&Self> {
+        self.0.get(index).map(Self::from_bytes)
+    }
+    pub fn get_mut<I: SliceIndex<[u8], Output = [u8]>>(&mut self, index: I) -> Option<&mut Self> {
+        self.0.get_mut(index).map(Self::from_bytes_mut)
+    }
+    pub fn split_at(&self, index: usize) -> (&Self, &Self) {
+        let (a, b) = self.0.split_at(index);
+        (Self::from_bytes(a), Self::from_bytes(b))
+    }
+    pub fn split_at_mut(&mut self, index: usize) -> (&mut Self, &mut Self) {
+        let (a, b) = self.0.split_at_mut(index);
+        (Self::from_bytes_mut(a), Self::from_bytes_mut(b))
+    }
+    pub fn strip_prefix<T: Pattern>(&self, needle: T) -> Option<&Self> {
+        T::strip_prefix(&self.0, needle).map(Self::from_bytes)
+    }
+    pub fn strip_suffix<T: Pattern>(&self, needle: T) -> Option<&Self> {
+        T::strip_suffix(&self.0, needle).map(Self::from_bytes)
+    }
+    pub fn find<T: Pattern>(&self, needle: T) -> Option<usize> {
+        T::find(&self.0, needle)
+    }
+    pub fn rfind<T: Pattern>(&self, needle: T) -> Option<usize> {
+        T::rfind(&self.0, needle)
+    }
+}
+
+impl<I: SliceIndex<[u8], Output = [u8]>> Index<I> for OsStr {
+    type Output = OsStr;
+
+    #[track_caller]
+    fn index(&self, index: I) -> &Self::Output {
+        Self::from_bytes(self.0.index(index))
+    }
+}
+
+impl<I: SliceIndex<[u8], Output = [u8]>> IndexMut<I> for OsStr {
+    #[track_caller]
+    fn index_mut(&mut self, index: I) -> &mut Self::Output {
+        Self::from_bytes_mut(self.0.index_mut(index))
     }
 }
 
@@ -185,7 +340,7 @@ impl PartialEq<str> for OsStr {
 
 impl PartialOrd<&'_ OsStr> for OsString {
     fn partial_cmp(&self, other: &&'_ OsStr) -> Option<Ordering> {
-        todo!()
+        (**self).partial_cmp(&**other)
     }
 }
 
