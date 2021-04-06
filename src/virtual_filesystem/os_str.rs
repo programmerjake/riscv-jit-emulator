@@ -9,11 +9,11 @@ use alloc::{
 };
 use core::{
     borrow::{Borrow, BorrowMut},
-    cmp::Ordering,
+    convert::Infallible,
     fmt, iter, mem,
-    ops::{Deref, DerefMut, Index, IndexMut, Range, RangeBounds},
+    ops::{Deref, DerefMut, Index, IndexMut},
     slice::{self, SliceIndex},
-    str,
+    str::{self, FromStr},
 };
 
 mod sealed {
@@ -115,12 +115,15 @@ macro_rules! impl_pattern_for_string_like {
     };
 }
 
+// we don't implement `Pattern` for `[u8]` since
+// that confuses between matching a substring and matching a character set
 impl_pattern_for_string_like!(&'_ mut OsStr);
 impl_pattern_for_string_like!(&'_ str);
 impl_pattern_for_string_like!(&'_ mut str);
 impl_pattern_for_string_like!(Box<OsStr>);
 impl_pattern_for_string_like!(String);
 impl_pattern_for_string_like!(OsString);
+impl_pattern_for_string_like!(&'_ OsString);
 
 #[derive(PartialEq, Eq, PartialOrd, Ord, Hash)]
 #[repr(transparent)]
@@ -140,7 +143,7 @@ impl OsStr {
         OsString(self.as_bytes().to_vec())
     }
     pub fn into_os_string(self: Box<OsStr>) -> OsString {
-        OsString(self.into_bytes().into())
+        OsString(self.into_boxed_bytes().into())
     }
     pub const fn is_empty(&self) -> bool {
         self.as_bytes().is_empty()
@@ -160,7 +163,7 @@ impl OsStr {
     pub fn as_bytes_mut(&mut self) -> &mut [u8] {
         &mut self.0
     }
-    pub fn into_bytes(self: Box<OsStr>) -> Box<[u8]> {
+    pub fn into_boxed_bytes(self: Box<OsStr>) -> Box<[u8]> {
         unsafe { Box::from_raw(Box::into_raw(self) as *mut [u8]) }
     }
     pub fn from_boxed_bytes(bytes: Box<[u8]>) -> Box<OsStr> {
@@ -201,6 +204,9 @@ impl OsStr {
     pub fn rfind<T: Pattern>(&self, needle: T) -> Option<usize> {
         T::rfind(&self.0, needle)
     }
+    pub fn contains<T: Pattern>(&self, needle: T) -> bool {
+        self.find(needle).is_some()
+    }
 }
 
 impl<I: SliceIndex<[u8], Output = [u8]>> Index<I> for OsStr {
@@ -221,6 +227,24 @@ impl<I: SliceIndex<[u8], Output = [u8]>> IndexMut<I> for OsStr {
 
 impl AsRef<OsStr> for OsStr {
     fn as_ref(&self) -> &OsStr {
+        self
+    }
+}
+
+impl AsRef<[u8]> for OsStr {
+    fn as_ref(&self) -> &[u8] {
+        self.as_bytes()
+    }
+}
+
+impl AsMut<[u8]> for OsStr {
+    fn as_mut(&mut self) -> &mut [u8] {
+        self.as_bytes_mut()
+    }
+}
+
+impl AsMut<OsStr> for OsStr {
+    fn as_mut(&mut self) -> &mut OsStr {
         self
     }
 }
@@ -266,6 +290,12 @@ impl Default for &'_ OsStr {
     }
 }
 
+impl Default for &'_ mut OsStr {
+    fn default() -> Self {
+        OsStr::from_bytes_mut(&mut [])
+    }
+}
+
 impl From<&'_ OsStr> for Box<OsStr> {
     fn from(v: &'_ OsStr) -> Self {
         OsStr::from_boxed_bytes(v.as_bytes().into())
@@ -278,125 +308,22 @@ impl<'a> From<&'a OsStr> for Cow<'a, OsStr> {
     }
 }
 
-impl PartialEq<&'_ OsStr> for OsString {
-    fn eq(&self, other: &&'_ OsStr) -> bool {
-        **self == **other
-    }
-}
-
-impl PartialEq<&'_ OsStr> for Cow<'_, OsStr> {
-    fn eq(&self, other: &&'_ OsStr) -> bool {
-        **self == **other
-    }
-}
-
-impl PartialEq<Cow<'_, OsStr>> for OsStr {
-    fn eq(&self, other: &Cow<'_, OsStr>) -> bool {
-        *self == **other
-    }
-}
-
-impl PartialEq<Cow<'_, OsStr>> for &'_ OsStr {
-    fn eq(&self, other: &Cow<'_, OsStr>) -> bool {
-        **self == **other
-    }
-}
-
-impl PartialEq<OsStr> for str {
-    fn eq(&self, other: &OsStr) -> bool {
-        OsStr::from_bytes(self.as_bytes()) == other
-    }
-}
-
-impl PartialEq<OsStr> for OsString {
-    fn eq(&self, other: &OsStr) -> bool {
-        **self == *other
-    }
-}
-
-impl PartialEq<OsStr> for Cow<'_, OsStr> {
-    fn eq(&self, other: &OsStr) -> bool {
-        **self == *other
-    }
-}
-
-impl PartialEq<OsString> for OsStr {
-    fn eq(&self, other: &OsString) -> bool {
-        *self == **other
-    }
-}
-
-impl PartialEq<OsString> for &'_ OsStr {
-    fn eq(&self, other: &OsString) -> bool {
-        **self == **other
-    }
-}
-
-impl PartialEq<str> for OsStr {
-    fn eq(&self, other: &str) -> bool {
-        self == OsStr::from_bytes(other.as_bytes())
-    }
-}
-
-impl PartialOrd<&'_ OsStr> for OsString {
-    fn partial_cmp(&self, other: &&'_ OsStr) -> Option<Ordering> {
-        (**self).partial_cmp(&**other)
-    }
-}
-
-impl PartialOrd<&'_ OsStr> for Cow<'_, OsStr> {
-    fn partial_cmp(&self, other: &&'_ OsStr) -> Option<Ordering> {
-        (**self).partial_cmp(*other)
-    }
-}
-
-impl PartialOrd<Cow<'_, OsStr>> for OsStr {
-    fn partial_cmp(&self, other: &Cow<'_, OsStr>) -> Option<Ordering> {
-        (*self).partial_cmp(&**other)
-    }
-}
-
-impl PartialOrd<Cow<'_, OsStr>> for &'_ OsStr {
-    fn partial_cmp(&self, other: &Cow<'_, OsStr>) -> Option<Ordering> {
-        (**self).partial_cmp(&**other)
-    }
-}
-
-impl PartialOrd<OsStr> for str {
-    fn partial_cmp(&self, other: &OsStr) -> Option<Ordering> {
-        OsStr::from_bytes(self.as_bytes()).partial_cmp(other)
-    }
-}
-
-impl PartialOrd<OsStr> for OsString {
-    fn partial_cmp(&self, other: &OsStr) -> Option<Ordering> {
-        (**self).partial_cmp(other)
-    }
-}
-
-impl PartialOrd<OsStr> for Cow<'_, OsStr> {
-    fn partial_cmp(&self, other: &OsStr) -> Option<Ordering> {
-        (**self).partial_cmp(other)
-    }
-}
-
-impl PartialOrd<OsString> for OsStr {
-    fn partial_cmp(&self, other: &OsString) -> Option<Ordering> {
-        (*self).partial_cmp(&**other)
-    }
-}
-
-impl PartialOrd<OsString> for &'_ OsStr {
-    fn partial_cmp(&self, other: &OsString) -> Option<Ordering> {
-        (**self).partial_cmp(&**other)
-    }
-}
-
-impl PartialOrd<str> for OsStr {
-    fn partial_cmp(&self, other: &str) -> Option<Ordering> {
-        (*self).partial_cmp(OsStr::from_bytes(other.as_bytes()))
-    }
-}
+impl_str_partial_eq_ord!(PartialOrd<&'_ OsStr> for OsString; (self, other) -> (self, other));
+impl_str_partial_eq_ord!(PartialOrd<&'_ OsStr> for Cow<'_, OsStr>; (self, other) -> (self, other));
+impl_str_partial_eq_ord!(PartialOrd<Cow<'_, OsStr>> for OsStr; (self, other) -> (self, other));
+impl_str_partial_eq_ord!(PartialOrd<Cow<'_, OsStr>> for OsString; (self, other) -> (self, other));
+impl_str_partial_eq_ord!(PartialOrd<Cow<'_, OsStr>> for &'_ OsStr; (self, other) -> (self, other));
+impl_str_partial_eq_ord!(PartialOrd<OsStr> for str; (self, other) -> (self.as_ref(), other));
+impl_str_partial_eq_ord!(PartialOrd<OsString> for str; (self, other) -> (self.as_ref(), other));
+impl_str_partial_eq_ord!(PartialOrd<OsString> for &'_ str; (self, other) -> (self.as_ref(), other));
+impl_str_partial_eq_ord!(PartialOrd<OsStr> for OsString; (self, other) -> (self, other));
+impl_str_partial_eq_ord!(PartialOrd<OsStr> for Cow<'_, OsStr>; (self, other) -> (self, other));
+impl_str_partial_eq_ord!(PartialOrd<OsString> for OsStr; (self, other) -> (self, other));
+impl_str_partial_eq_ord!(PartialOrd<OsString> for &'_ OsStr; (self, other) -> (self, other));
+impl_str_partial_eq_ord!(PartialOrd<OsString> for Cow<'_, OsStr>; (self, other) -> (self, other));
+impl_str_partial_eq_ord!(PartialOrd<str> for OsStr; (self, other) -> (self, other.as_ref()));
+impl_str_partial_eq_ord!(PartialOrd<str> for OsString; (self, other) -> (self, other.as_ref()));
+impl_str_partial_eq_ord!(PartialOrd<&'_ str> for OsString; (self, other) -> (self, other.as_ref()));
 
 impl ToOwned for OsStr {
     type Owned = OsString;
@@ -406,12 +333,36 @@ impl ToOwned for OsStr {
     }
 }
 
-#[derive(Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[derive(Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
 pub struct OsString(Vec<u8>);
+
+impl fmt::Debug for OsString {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        (**self).fmt(f)
+    }
+}
 
 impl AsRef<OsStr> for OsString {
     fn as_ref(&self) -> &OsStr {
         self
+    }
+}
+
+impl AsMut<OsStr> for OsString {
+    fn as_mut(&mut self) -> &mut OsStr {
+        self
+    }
+}
+
+impl AsMut<[u8]> for OsString {
+    fn as_mut(&mut self) -> &mut [u8] {
+        &mut self.0
+    }
+}
+
+impl AsRef<[u8]> for OsString {
+    fn as_ref(&self) -> &[u8] {
+        &self.0
     }
 }
 
@@ -438,5 +389,119 @@ impl Borrow<OsStr> for OsString {
 impl BorrowMut<OsStr> for OsString {
     fn borrow_mut(&mut self) -> &mut OsStr {
         self
+    }
+}
+
+impl OsString {
+    pub fn new() -> Self {
+        OsString(Vec::new())
+    }
+    pub fn as_os_str(&self) -> &OsStr {
+        self
+    }
+    pub fn as_mut_os_str(&mut self) -> &mut OsStr {
+        self
+    }
+    pub fn into_string(self) -> Result<String, OsString> {
+        String::from_utf8(self.0).map_err(|e| OsString(e.into_bytes()))
+    }
+    pub fn push<T: AsRef<OsStr>>(&mut self, v: T) {
+        self.0.extend(v.as_ref().as_bytes());
+    }
+    pub fn with_capacity(capacity: usize) -> Self {
+        OsString(Vec::with_capacity(capacity))
+    }
+    pub fn clear(&mut self) {
+        self.0.clear();
+    }
+    pub fn capacity(&self) -> usize {
+        self.0.capacity()
+    }
+    pub fn reserve(&mut self, additional: usize) {
+        self.0.reserve(additional);
+    }
+    pub fn reserve_exact(&mut self, additional: usize) {
+        self.0.reserve_exact(additional);
+    }
+    pub fn shrink_to_fit(&mut self) {
+        self.0.shrink_to_fit();
+    }
+    pub fn into_boxed_os_str(self) -> Box<OsStr> {
+        OsStr::from_boxed_bytes(self.0.into_boxed_slice())
+    }
+    pub fn from_vec(v: Vec<u8>) -> Self {
+        OsString(v)
+    }
+    pub fn into_vec(self) -> Vec<u8> {
+        self.0
+    }
+    pub fn as_mut_vec(&mut self) -> &mut Vec<u8> {
+        &mut self.0
+    }
+}
+
+impl<T: ?Sized + AsRef<OsStr>> From<&'_ T> for OsString {
+    fn from(v: &'_ T) -> Self {
+        v.as_ref().to_os_string()
+    }
+}
+
+impl<'a> From<&'a OsString> for Cow<'a, OsStr> {
+    fn from(v: &'a OsString) -> Self {
+        Cow::Borrowed(v)
+    }
+}
+
+impl From<Box<OsStr>> for OsString {
+    fn from(v: Box<OsStr>) -> Self {
+        v.into_os_string()
+    }
+}
+
+impl From<Cow<'_, OsStr>> for OsString {
+    fn from(v: Cow<'_, OsStr>) -> Self {
+        v.into_owned()
+    }
+}
+
+impl From<OsString> for Box<OsStr> {
+    fn from(v: OsString) -> Self {
+        v.into_boxed_os_str()
+    }
+}
+
+impl From<OsString> for Cow<'_, OsStr> {
+    fn from(v: OsString) -> Self {
+        Cow::Owned(v)
+    }
+}
+
+impl From<String> for OsString {
+    fn from(v: String) -> Self {
+        OsString(v.into_bytes())
+    }
+}
+
+impl FromStr for OsString {
+    type Err = Infallible;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        Ok(s.into())
+    }
+}
+
+impl<I: SliceIndex<[u8], Output = [u8]>> Index<I> for OsString {
+    type Output = OsStr;
+
+    #[track_caller]
+    fn index(&self, index: I) -> &Self::Output {
+        OsStr::from_bytes(self.0.index(index))
+    }
+}
+
+impl<I: SliceIndex<[u8], Output = [u8]>> IndexMut<I> for OsString {
+    #[track_caller]
+    fn index_mut(&mut self, index: I) -> &mut Self::Output {
+        OsStr::from_bytes_mut(self.0.index_mut(index))
     }
 }
