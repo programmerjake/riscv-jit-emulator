@@ -13,7 +13,7 @@ use core::{
     fmt,
     iter::FusedIterator,
     mem,
-    ops::{Deref, DerefMut},
+    ops::{Deref, DerefMut, Range},
 };
 
 #[derive(Clone, Copy, Debug, Hash, PartialEq, Eq, PartialOrd, Ord)]
@@ -56,15 +56,18 @@ enum ComponentsPrefix {
 
 #[derive(Clone, Debug)]
 pub struct Components<'a> {
-    path: &'a OsStr,
+    original_path: &'a OsStr,
+    range: Range<usize>,
     prefix: ComponentsPrefix,
 }
 
 impl<'a> Components<'a> {
     fn next_non_slash_part(&mut self) -> Option<&'a OsStr> {
-        let end = self.path.find(b'/').unwrap_or(self.path.len());
-        let (part, rest) = self.path.split_at(end);
-        self.path = rest;
+        let end = self.original_path[self.range.clone()]
+            .find(b'/')
+            .unwrap_or(self.range.len());
+        let part = &self.original_path[self.range.clone()][..end];
+        self.range.start += end;
         self.trim();
         if part.is_empty() || part == "." {
             None
@@ -73,9 +76,11 @@ impl<'a> Components<'a> {
         }
     }
     fn next_back_non_slash_part(&mut self) -> Option<&'a OsStr> {
-        let start = self.path.rfind(b'/').map_or(0, |v| v + 1);
-        let (rest, part) = self.path.split_at(start);
-        self.path = rest;
+        let start = self.original_path[self.range.clone()]
+            .rfind(b'/')
+            .map_or(0, |v| v + 1);
+        let part = &self.original_path[self.range.clone()][start..];
+        self.range.end = self.range.start + start;
         self.trim();
         if part.is_empty() || part == "." {
             None
@@ -90,55 +95,67 @@ impl<'a> Components<'a> {
         }
     }
     fn strip_leading_slashes(&mut self) {
-        let index = self.path.find(|v| v != b'/').unwrap_or(self.path.len());
-        self.path = &self.path[index..];
+        let index = self.original_path[self.range.clone()]
+            .find(|v| v != b'/')
+            .unwrap_or(self.range.len());
+        self.range.start += index;
     }
     fn strip_trailing_slashes(&mut self) {
-        if let Some(index) = self.path.rfind(|v| v != b'/') {
-            self.path = &self.path[..=index];
+        if let Some(index) = self.original_path[self.range.clone()].rfind(|v| v != b'/') {
+            self.range.end = self.range.start + index + 1;
         } else {
-            self.path = OsStr::new("");
+            self.range = 0..0;
         }
     }
     fn trim(&mut self) {
         self.strip_trailing_slashes();
-        while let Some(path) = self.path.strip_suffix("/.") {
-            self.path = path;
+        while self.original_path[self.range.clone()].ends_with("/.") {
+            self.range.end -= 2;
             self.strip_trailing_slashes();
         }
         match self.prefix {
             ComponentsPrefix::RootDir => {
-                if let Some(first_non_slash) = self.path.find(|v| v != b'/') {
-                    self.path = &self.path[first_non_slash - 1..];
-                } else {
-                    self.path = OsStr::new("/");
+                let first_non_slash = self.original_path[self.range.clone()]
+                    .find(|v| v != b'/')
+                    .unwrap_or(1);
+                self.range.start += first_non_slash - 1;
+                if self.range.is_empty() {
+                    self.range = 0..1;
                 }
+                debug_assert_eq!(
+                    self.original_path.as_bytes().get(self.range.start),
+                    Some(&b'/')
+                );
             }
             ComponentsPrefix::CurDir => {
-                if self.path == "" {
-                    self.path = OsStr::new(".");
+                if self.range.is_empty() {
+                    self.range = 0..1;
                 }
+                debug_assert_eq!(
+                    self.original_path.as_bytes().get(self.range.start),
+                    Some(&b'.')
+                );
             }
             ComponentsPrefix::None => {
                 self.strip_leading_slashes();
-                while let Some(path) = self.path.strip_prefix("./") {
-                    self.path = path;
+                while self.original_path[self.range.clone()].starts_with("./") {
+                    self.range.start += 2;
                     self.strip_leading_slashes();
                 }
-                if self.path == "." {
-                    self.path = OsStr::new("");
+                if &self.original_path[self.range.clone()] == "." {
+                    self.range = 0..0;
                 }
             }
         }
     }
     pub fn as_path(&self) -> &'a Path {
-        Path::new(self.path)
+        Path::new(&self.original_path[self.range.clone()])
     }
 }
 
 impl AsRef<OsStr> for Components<'_> {
     fn as_ref(&self) -> &OsStr {
-        self.path
+        self.as_path().as_ref()
     }
 }
 
@@ -166,7 +183,7 @@ impl<'a> Iterator for Components<'a> {
         if let Some(part) = self.next_non_slash_part() {
             Some(Self::part_to_component(part))
         } else {
-            self.path = OsStr::new("");
+            self.range = 0..0;
             None
         }
     }
@@ -182,7 +199,7 @@ impl<'a> DoubleEndedIterator for Components<'a> {
             ComponentsPrefix::RootDir => Some(Component::RootDir),
             ComponentsPrefix::CurDir => Some(Component::CurDir),
         };
-        self.path = OsStr::new("");
+        self.range = 0..0;
         retval
     }
 }
@@ -261,13 +278,12 @@ impl<'a> Iterator for Ancestors<'a> {
     }
 }
 
-fn iter_strip_prefix<Retval, Match>(retval: Retval, match_iter: Match) -> Option<Retval::IntoIter>
+// specify `Iterator::Item` to work around https://github.com/rust-lang/rust/issues/83957
+fn iter_strip_prefix<'a, 'b, Retval, Match>(mut retval: Retval, match_iter: Match) -> Option<Retval>
 where
-    Retval: IntoIterator,
-    Match: IntoIterator,
-    Retval::Item: PartialEq<Match::Item>,
+    Retval: Iterator<Item = Component<'a>>,
+    Match: IntoIterator<Item = Component<'b>>,
 {
-    let mut retval = retval.into_iter();
     for match_item in match_iter {
         if retval.next()? != match_item {
             return None;
@@ -349,7 +365,8 @@ impl Path {
     }
     pub fn components<'a>(&'a self) -> Components<'a> {
         let mut retval = Components {
-            path: &self.0,
+            original_path: &self.0,
+            range: 0..self.0.len(),
             prefix: if self.has_root() {
                 ComponentsPrefix::RootDir
             } else if self.0.starts_with("./") || &self.0 == "." {
@@ -361,14 +378,17 @@ impl Path {
         retval.trim();
         retval
     }
-    pub fn parent(&self) -> Option<&Self> {
+    fn parent_range(&self) -> Option<Range<usize>> {
         let mut components = self.components();
         match components.next_back()? {
             Component::RootDir => None,
             Component::CurDir | Component::ParentDir | Component::Normal(_) => {
-                Some(components.as_path())
+                Some(components.range)
             }
         }
+    }
+    pub fn parent(&self) -> Option<&Self> {
+        self.parent_range().map(|range| Path::new(&self.0[range]))
     }
     pub fn file_name(&self) -> Option<&OsStr> {
         if let Component::Normal(retval) = self.components().next_back()? {
@@ -377,26 +397,45 @@ impl Path {
             None
         }
     }
-    pub fn strip_prefix<P: AsRef<Path>>(&self, base: P) -> Result<&Path, StripPrefixError> {
-        todo!()
+    pub fn strip_prefix<'a, P: AsRef<Path>>(
+        &'a self,
+        base: P,
+    ) -> Result<&'a Path, StripPrefixError> {
+        if let Some(v) = iter_strip_prefix(self.components(), base.as_ref().components()) {
+            Ok(v.as_path())
+        } else {
+            Err(StripPrefixError(()))
+        }
     }
     pub fn starts_with<P: AsRef<Path>>(&self, base: P) -> bool {
-        todo!()
+        iter_strip_prefix(self.components(), base.as_ref().components()).is_some()
     }
     pub fn ends_with<P: AsRef<Path>>(&self, child: P) -> bool {
-        todo!()
+        iter_strip_prefix(self.components().rev(), child.as_ref().components().rev()).is_some()
+    }
+    fn file_stem_and_extension(&self) -> Option<(&OsStr, Option<&OsStr>)> {
+        let file_name = self.file_name()?;
+        match file_name.rfind(b'.') {
+            None | Some(0) => Some((file_name, None)),
+            Some(dot_index) => Some((&file_name[..dot_index], Some(&file_name[dot_index + 1..]))),
+        }
     }
     pub fn file_stem(&self) -> Option<&OsStr> {
-        todo!()
+        Some(self.file_stem_and_extension()?.0)
     }
     pub fn extension(&self) -> Option<&OsStr> {
-        todo!()
+        self.file_stem_and_extension()?.1
     }
+    #[must_use]
     pub fn join<P: AsRef<Path>>(&self, path: P) -> PathBuf {
-        todo!()
+        let mut retval = self.to_path_buf();
+        retval.push(path);
+        retval
     }
     pub fn with_file_name<S: AsRef<OsStr>>(&self, file_name: S) -> PathBuf {
-        todo!()
+        let mut retval = self.to_path_buf();
+        retval.set_file_name(file_name);
+        retval
     }
     pub fn with_extension<S: AsRef<OsStr>>(&self, extension: S) -> PathBuf {
         todo!()
@@ -480,7 +519,36 @@ impl<'a> IntoIterator for &'a Path {
 
 #[derive(Clone, PartialEq, Eq, PartialOrd, Ord)]
 pub struct PathBuf(OsString);
-// TODO: add all members and impls for PathBuf
+
+impl PathBuf {
+    // TODO: add all members and impls for PathBuf
+    pub fn push<P: AsRef<Path>>(&mut self, path: P) {
+        let path = path.as_ref();
+        if path.is_absolute() {
+            self.0.clear();
+        } else if !path.0.ends_with(b'/') {
+            self.0.push("/");
+        }
+        self.0.push(path);
+    }
+    pub fn set_file_name<S: AsRef<OsStr>>(&mut self, file_name: S) {
+        if self.file_name().is_some() {
+            assert!(self.pop());
+        }
+        self.push(file_name.as_ref());
+    }
+    pub fn pop(&mut self) -> bool {
+        if let Some(range) = self.parent_range() {
+            if range.start != 0 {
+                self.0.as_mut_vec().copy_within(range.clone(), 0);
+            }
+            self.0.as_mut_vec().truncate(range.len());
+            true
+        } else {
+            false
+        }
+    }
+}
 
 impl fmt::Debug for PathBuf {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
