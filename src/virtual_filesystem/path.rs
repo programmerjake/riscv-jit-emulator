@@ -10,10 +10,12 @@ use alloc::{
 use core::{
     borrow::{Borrow, BorrowMut},
     cmp::Ordering,
+    convert::Infallible,
     fmt,
-    iter::FusedIterator,
+    iter::{FromIterator, FusedIterator},
     mem,
     ops::{Deref, DerefMut, Range},
+    str::FromStr,
 };
 
 #[derive(Clone, Copy, Debug, Hash, PartialEq, Eq, PartialOrd, Ord)]
@@ -62,30 +64,32 @@ pub struct Components<'a> {
 }
 
 impl<'a> Components<'a> {
-    fn next_non_slash_part(&mut self) -> Option<&'a OsStr> {
+    fn next_non_slash_part(&mut self) -> Option<(&'a OsStr, Range<usize>)> {
         let end = self.original_path[self.range.clone()]
             .find(b'/')
             .unwrap_or(self.range.len());
-        let part = &self.original_path[self.range.clone()][..end];
-        self.range.start += end;
+        let part_range = self.range.start..self.range.start + end;
+        let part = &self.original_path[part_range.clone()];
+        self.range.start = part_range.end;
         self.trim();
         if part.is_empty() || part == "." {
             None
         } else {
-            Some(part)
+            Some((part, part_range))
         }
     }
-    fn next_back_non_slash_part(&mut self) -> Option<&'a OsStr> {
+    fn next_back_non_slash_part(&mut self) -> Option<(&'a OsStr, Range<usize>)> {
         let start = self.original_path[self.range.clone()]
             .rfind(b'/')
             .map_or(0, |v| v + 1);
-        let part = &self.original_path[self.range.clone()][start..];
-        self.range.end = self.range.start + start;
+        let part_range = self.range.start + start..self.range.end;
+        let part = &self.original_path[part_range.clone()];
+        self.range.end = part_range.start;
         self.trim();
         if part.is_empty() || part == "." {
             None
         } else {
-            Some(part)
+            Some((part, part_range))
         }
     }
     fn part_to_component(part: &'a OsStr) -> Component<'a> {
@@ -148,6 +152,37 @@ impl<'a> Components<'a> {
             }
         }
     }
+    fn next_range(&mut self) -> Option<(Component<'a>, Range<usize>)> {
+        match mem::replace(&mut self.prefix, ComponentsPrefix::None) {
+            ComponentsPrefix::None => {}
+            ComponentsPrefix::RootDir => {
+                self.trim();
+                return Some((Component::RootDir, 0..1));
+            }
+            ComponentsPrefix::CurDir => {
+                self.trim();
+                return Some((Component::CurDir, 0..1));
+            }
+        }
+        if let Some((part, part_range)) = self.next_non_slash_part() {
+            Some((Self::part_to_component(part), part_range))
+        } else {
+            self.range = 0..0;
+            None
+        }
+    }
+    fn next_back_range(&mut self) -> Option<(Component<'a>, Range<usize>)> {
+        if let Some((part, part_range)) = self.next_back_non_slash_part() {
+            return Some((Self::part_to_component(part), part_range));
+        }
+        let retval = match mem::replace(&mut self.prefix, ComponentsPrefix::None) {
+            ComponentsPrefix::None => None,
+            ComponentsPrefix::RootDir => Some((Component::RootDir, 0..1)),
+            ComponentsPrefix::CurDir => Some((Component::CurDir, 0..1)),
+        };
+        self.range = 0..0;
+        retval
+    }
     pub fn as_path(&self) -> &'a Path {
         Path::new(&self.original_path[self.range.clone()])
     }
@@ -169,38 +204,13 @@ impl<'a> Iterator for Components<'a> {
     type Item = Component<'a>;
 
     fn next(&mut self) -> Option<Self::Item> {
-        match mem::replace(&mut self.prefix, ComponentsPrefix::None) {
-            ComponentsPrefix::None => {}
-            ComponentsPrefix::RootDir => {
-                self.trim();
-                return Some(Component::RootDir);
-            }
-            ComponentsPrefix::CurDir => {
-                self.trim();
-                return Some(Component::CurDir);
-            }
-        }
-        if let Some(part) = self.next_non_slash_part() {
-            Some(Self::part_to_component(part))
-        } else {
-            self.range = 0..0;
-            None
-        }
+        Some(self.next_range()?.0)
     }
 }
 
 impl<'a> DoubleEndedIterator for Components<'a> {
     fn next_back(&mut self) -> Option<Self::Item> {
-        if let Some(part) = self.next_back_non_slash_part() {
-            return Some(Self::part_to_component(part));
-        }
-        let retval = match mem::replace(&mut self.prefix, ComponentsPrefix::None) {
-            ComponentsPrefix::None => None,
-            ComponentsPrefix::RootDir => Some(Component::RootDir),
-            ComponentsPrefix::CurDir => Some(Component::CurDir),
-        };
-        self.range = 0..0;
-        retval
+        Some(self.next_back_range()?.0)
     }
 }
 
@@ -311,7 +321,7 @@ impl fmt::Debug for Display<'_> {
 
 impl fmt::Display for Display<'_> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        todo!()
+        (self.0).to_string_lossy().fmt(f)
     }
 }
 
@@ -390,12 +400,15 @@ impl Path {
     pub fn parent(&self) -> Option<&Self> {
         self.parent_range().map(|range| Path::new(&self.0[range]))
     }
-    pub fn file_name(&self) -> Option<&OsStr> {
-        if let Component::Normal(retval) = self.components().next_back()? {
-            Some(retval)
+    fn file_name_range(&self) -> Option<(&OsStr, Range<usize>)> {
+        if let (Component::Normal(retval), range) = self.components().next_back_range()? {
+            Some((retval, range))
         } else {
             None
         }
+    }
+    pub fn file_name(&self) -> Option<&OsStr> {
+        Some(self.file_name_range()?.0)
     }
     pub fn strip_prefix<'a, P: AsRef<Path>>(
         &'a self,
@@ -413,18 +426,28 @@ impl Path {
     pub fn ends_with<P: AsRef<Path>>(&self, child: P) -> bool {
         iter_strip_prefix(self.components().rev(), child.as_ref().components().rev()).is_some()
     }
-    fn file_stem_and_extension(&self) -> Option<(&OsStr, Option<&OsStr>)> {
-        let file_name = self.file_name()?;
+    fn file_stem_and_extension(
+        &self,
+    ) -> Option<(&OsStr, Range<usize>, Option<(&OsStr, Range<usize>)>)> {
+        let (file_name, range) = self.file_name_range()?;
         match file_name.rfind(b'.') {
-            None | Some(0) => Some((file_name, None)),
-            Some(dot_index) => Some((&file_name[..dot_index], Some(&file_name[dot_index + 1..]))),
+            None | Some(0) => Some((file_name, range, None)),
+            Some(dot_index) => {
+                let stem_range = range.start..range.start + dot_index;
+                let extension_range = range.start + dot_index + 1..range.end;
+                Some((
+                    &self.0[stem_range.clone()],
+                    stem_range,
+                    Some((&self.0[extension_range.clone()], extension_range)),
+                ))
+            }
         }
     }
     pub fn file_stem(&self) -> Option<&OsStr> {
         Some(self.file_stem_and_extension()?.0)
     }
     pub fn extension(&self) -> Option<&OsStr> {
-        self.file_stem_and_extension()?.1
+        Some(self.file_stem_and_extension()?.2?.0)
     }
     #[must_use]
     pub fn join<P: AsRef<Path>>(&self, path: P) -> PathBuf {
@@ -438,7 +461,9 @@ impl Path {
         retval
     }
     pub fn with_extension<S: AsRef<OsStr>>(&self, extension: S) -> PathBuf {
-        todo!()
+        let mut retval = self.to_path_buf();
+        retval.set_extension(extension);
+        retval
     }
     pub fn iter(&self) -> Iter<'_> {
         Iter(self.components())
@@ -501,6 +526,12 @@ impl From<&'_ Path> for Box<Path> {
     }
 }
 
+impl From<PathBuf> for Box<Path> {
+    fn from(v: PathBuf) -> Self {
+        v.into_boxed_path()
+    }
+}
+
 impl<'a> From<&'a Path> for Cow<'a, Path> {
     fn from(v: &'a Path) -> Self {
         Cow::Borrowed(v)
@@ -517,11 +548,13 @@ impl<'a> IntoIterator for &'a Path {
     }
 }
 
-#[derive(Clone, PartialEq, Eq, PartialOrd, Ord)]
+#[derive(Clone, PartialEq, Eq, PartialOrd, Ord, Default, Hash)]
 pub struct PathBuf(OsString);
 
 impl PathBuf {
-    // TODO: add all members and impls for PathBuf
+    pub fn as_path(&self) -> &Path {
+        self
+    }
     pub fn push<P: AsRef<Path>>(&mut self, path: P) {
         let path = path.as_ref();
         if path.is_absolute() {
@@ -547,6 +580,67 @@ impl PathBuf {
         } else {
             false
         }
+    }
+    pub fn set_extension<S: AsRef<OsStr>>(&mut self, extension: S) -> bool {
+        if let Some((
+            _,
+            Range {
+                end: file_stem_end,
+                start: _,
+            },
+            _,
+        )) = self.file_stem_and_extension()
+        {
+            self.0.as_mut_vec().truncate(file_stem_end);
+            let extension = extension.as_ref();
+            if !extension.is_empty() {
+                self.0.reserve_exact(extension.len() + 1);
+                self.0.push(".");
+                self.0.push(extension);
+            }
+            true
+        } else {
+            false
+        }
+    }
+    pub fn into_os_string(self) -> OsString {
+        self.0
+    }
+    pub fn into_boxed_path(self) -> Box<Path> {
+        Path::from_boxed_os_str(self.0.into_boxed_os_str())
+    }
+    pub fn capacity(&self) -> usize {
+        self.0.capacity()
+    }
+    pub fn clear(&mut self) {
+        self.0.clear();
+    }
+    pub fn reserve(&mut self, additional: usize) {
+        self.0.reserve(additional);
+    }
+    pub fn reserve_exact(&mut self, additional: usize) {
+        self.0.reserve_exact(additional);
+    }
+    pub fn shrink_to_fit(&mut self) {
+        self.0.shrink_to_fit();
+    }
+}
+
+impl<P: AsRef<Path>> Extend<P> for PathBuf {
+    fn extend<T: IntoIterator<Item = P>>(&mut self, iter: T) {
+        iter.into_iter().for_each(|path| self.push(path));
+    }
+}
+
+impl<T: ?Sized + AsRef<OsStr>> From<&'_ T> for PathBuf {
+    fn from(v: &'_ T) -> Self {
+        PathBuf(v.into())
+    }
+}
+
+impl<'a> From<&'a PathBuf> for Cow<'a, Path> {
+    fn from(v: &'a PathBuf) -> Self {
+        Cow::Borrowed(v)
     }
 }
 
@@ -624,17 +718,70 @@ impl From<OsString> for PathBuf {
     }
 }
 
+impl From<Box<Path>> for PathBuf {
+    fn from(v: Box<Path>) -> Self {
+        v.into_path_buf()
+    }
+}
+
 impl From<PathBuf> for OsString {
     fn from(v: PathBuf) -> Self {
         v.0
     }
 }
 
+impl From<PathBuf> for Cow<'_, Path> {
+    fn from(v: PathBuf) -> Self {
+        Cow::Owned(v)
+    }
+}
+
+impl From<Cow<'_, Path>> for PathBuf {
+    fn from(v: Cow<'_, Path>) -> Self {
+        v.into_owned()
+    }
+}
+
+impl From<String> for PathBuf {
+    fn from(v: String) -> Self {
+        PathBuf(v.into())
+    }
+}
+
+impl<P: AsRef<Path>> FromIterator<P> for PathBuf {
+    fn from_iter<T: IntoIterator<Item = P>>(iter: T) -> Self {
+        let mut retval = PathBuf::default();
+        retval.extend(iter);
+        retval
+    }
+}
+
+impl FromStr for PathBuf {
+    type Err = Infallible;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        Ok(s.into())
+    }
+}
+
+impl<'a> IntoIterator for &'a PathBuf {
+    type Item = &'a OsStr;
+
+    type IntoIter = Iter<'a>;
+
+    fn into_iter(self) -> Self::IntoIter {
+        self.iter()
+    }
+}
+
 impl_str_partial_eq_ord!(PartialOrd<&'_ OsStr> for PathBuf; (self, other) -> (&self.0, other));
+impl_str_partial_eq_ord!(PartialOrd<Cow<'_, OsStr>> for PathBuf; (self, other) -> (&self.0, other));
 impl_str_partial_eq_ord!(PartialOrd<&'_ Path> for PathBuf; (self, other) -> (&self.0, &other.0));
+impl_str_partial_eq_ord!(PartialOrd<Cow<'_, Path>> for PathBuf; (self, other) -> (&self.0, &other.0));
 impl_str_partial_eq_ord!(PartialOrd<Path> for PathBuf; (self, other) -> (&self.0, &other.0));
 impl_str_partial_eq_ord!(PartialOrd<PathBuf> for Path; (self, other) -> (&self.0, &other.0));
 impl_str_partial_eq_ord!(PartialOrd<PathBuf> for &'_ Path; (self, other) -> (&self.0, &other.0));
+impl_str_partial_eq_ord!(PartialOrd<PathBuf> for Cow<'_, Path>; (self, other) -> (&self.0, &other.0));
 impl_str_partial_eq_ord!(PartialOrd<Path> for Cow<'_, Path>; (self, other) -> (&self.0, &other.0));
 impl_str_partial_eq_ord!(PartialOrd<Cow<'_, Path>> for Path; (self, other) -> (&self.0, &other.0));
 impl_str_partial_eq_ord!(PartialOrd<Cow<'_, Path>> for &'_ Path; (self, other) -> (&self.0, &other.0));
@@ -664,6 +811,7 @@ impl_str_partial_eq_ord!(PartialOrd<Path> for Cow<'_, OsStr>; (self, other) -> (
 impl_str_partial_eq_ord!(PartialOrd<PathBuf> for OsStr; (self, other) -> (self, &other.0));
 impl_str_partial_eq_ord!(PartialOrd<PathBuf> for OsString; (self, other) -> (self, &other.0));
 impl_str_partial_eq_ord!(PartialOrd<PathBuf> for &'_ OsStr; (self, other) -> (self, &other.0));
+impl_str_partial_eq_ord!(PartialOrd<PathBuf> for Cow<'_, OsStr>; (self, other) -> (self, &other.0));
 
 #[cfg(test)]
 mod test {
