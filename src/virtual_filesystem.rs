@@ -39,9 +39,60 @@ pub struct FSError {
     body: FSErrorBody,
 }
 
-pub trait File: Send + Sync + fmt::Debug + 'static {
-    fn read_all(&self) -> Result<Vec<u8>, FSError>;
+pub trait AsFile {
+    fn as_file(&self) -> &dyn File;
 }
+
+impl<T: File> AsFile for T {
+    fn as_file(&self) -> &dyn File {
+        self
+    }
+}
+
+pub trait File: Send + Sync + fmt::Debug + 'static + AsFile {}
+
+pub trait AsReadableFile: AsFile {
+    fn as_rd_file(&self) -> &dyn ReadableFile;
+}
+
+impl<T: ReadableFile> AsReadableFile for T {
+    fn as_rd_file(&self) -> &dyn ReadableFile {
+        self
+    }
+}
+
+pub trait ReadableFile: File + AsReadableFile {
+    fn read_all(&self) -> Result<Vec<u8>, FSError>;
+    // TODO: finish
+}
+
+pub trait AsWritableFile: AsFile {
+    fn as_wr_file(&self) -> &dyn WritableFile;
+}
+
+impl<T: WritableFile> AsWritableFile for T {
+    fn as_wr_file(&self) -> &dyn WritableFile {
+        self
+    }
+}
+
+pub trait WritableFile: File + AsWritableFile {
+    // TODO: finish
+}
+
+pub trait AsRWFile: AsReadableFile + AsWritableFile {
+    fn as_rw_file(&self) -> &dyn RWFile;
+}
+
+impl<T: RWFile> AsRWFile for T {
+    fn as_rw_file(&self) -> &dyn RWFile {
+        self
+    }
+}
+
+pub trait RWFile: ReadableFile + WritableFile + AsRWFile {}
+
+impl<T: ?Sized + ReadableFile + WritableFile + AsRWFile> RWFile for T {}
 
 pub trait SymbolicLink: Send + Sync + fmt::Debug + 'static {
     fn target(&self) -> &Path;
@@ -54,17 +105,20 @@ pub enum EntryType {
     SymbolicLink,
 }
 
-#[derive(Clone, Debug)]
-pub enum OpenedEntry {
-    Normal(Arc<dyn File>),
-    Directory(Arc<dyn Directory>),
-    SymbolicLink(Arc<dyn SymbolicLink>),
+#[derive(Clone, Copy, Debug, Default)]
+pub struct FileOpenFlags {
+    _private: (),
 }
 
 pub trait DirectoryEntry<'a>: fmt::Debug + 'a {
+    fn clone(&self) -> Box<dyn DirectoryEntry<'static>>;
     fn name(&self) -> &OsStr;
     fn entry_type(&self) -> EntryType;
-    fn open(&self) -> Result<OpenedEntry, FSError>;
+    fn unlink(&self) -> Result<(), FSError>;
+    fn open_file_no_access(&self, flags: FileOpenFlags) -> Result<Box<dyn File>, FSError>;
+    fn open_file_readable(&self, flags: FileOpenFlags) -> Result<Box<dyn ReadableFile>, FSError>;
+    fn open_file_writable(&self, flags: FileOpenFlags) -> Result<Box<dyn WritableFile>, FSError>;
+    fn open_file_rw(&self, flags: FileOpenFlags) -> Result<Box<dyn RWFile>, FSError>;
 }
 
 pub trait DirectoryEntries: Send + Sync + fmt::Debug {
@@ -73,10 +127,19 @@ pub trait DirectoryEntries: Send + Sync + fmt::Debug {
 }
 
 pub trait Directory: Send + Sync + fmt::Debug {
+    fn create_hard_link(
+        &self,
+        name: &OsStr,
+        file: &dyn File,
+    ) -> Result<Box<dyn DirectoryEntry<'static>>, FSError>;
     fn get(&self, name: &OsStr) -> Result<Option<Box<dyn DirectoryEntry<'static>>>, FSError>;
     fn entries(&self) -> Box<dyn DirectoryEntries>;
 }
 
-pub trait Filesystem: Send + Sync + fmt::Debug {
+pub trait Filesystem: Send + Sync + fmt::Debug + FilesystemExt {
     fn root(&self) -> &Arc<dyn Directory>;
 }
+
+pub trait FilesystemExt {}
+
+impl<T: ?Sized + Filesystem> FilesystemExt for T {}
