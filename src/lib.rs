@@ -5,6 +5,7 @@
 extern crate alloc;
 extern crate std;
 
+pub mod backend;
 pub mod bit_array;
 pub mod decoder;
 pub mod frontend;
