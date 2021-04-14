@@ -3,6 +3,8 @@
 
 use core::{convert::TryFrom, fmt};
 
+pub trait CompiledCode: fmt::Debug + 'static + Send + Sync {}
+
 pub trait Type<'ctx>: fmt::Debug + Clone {}
 
 macro_rules! impl_context_types {
@@ -12,15 +14,15 @@ macro_rules! impl_context_types {
         }
     ) => {
         type Type: Type<$ctx> $(+ From<Self::$type>)*;
-        type TypeTryFromError: fmt::Debug + 'static;
         $(
-            type $type: Type<'ctx> + TryFrom<Self::Type, Error = Self::TypeTryFromError>;
-            fn $type_fn(&$ctx self) -> Self::$type;
+            type $type: Type<$ctx>;
+            fn $type_fn(self) -> Self::$type;
         )*
     };
 }
 
-pub trait Context<'ctx>: fmt::Debug {
+pub trait ContextRef<'ctx>: fmt::Debug + Copy + 'ctx {
+    type CompiledCode: CompiledCode;
     impl_context_types! {
         impl<'ctx> {
             fn bool_type() -> Self::BoolType;
@@ -36,18 +38,26 @@ pub trait Context<'ctx>: fmt::Debug {
     }
 }
 
-pub trait BackendCreateContext<'ctx>: Clone + Send + Sync + 'static + fmt::Debug {
-    type ContextInner: 'ctx;
-    type Context: Context<'ctx>;
-    fn create_context_inner() -> Self::ContextInner;
-    fn create_context(inner: &'ctx Self::ContextInner) -> Self::Context;
+pub trait CallWithContext<B>
+where
+    B: Backend,
+{
+    type Output;
+    fn call<'ctx, C: ContextRef<'ctx, CompiledCode = B::CompiledCode>>(
+        self,
+        backend: &B,
+        context: C,
+    ) -> Self::Output;
 }
 
-pub trait Backend: for<'ctx> BackendCreateContext<'ctx> {}
+pub trait Backend: Clone + Send + Sync + 'static + fmt::Debug {
+    type CompiledCode: CompiledCode;
+    fn with_context<F: CallWithContext<Self>>(&self, f: F) -> F::Output;
+}
 
 pub trait CallWithBackend {
     type Output;
-    fn call<T: Backend>(self) -> Self::Output;
+    fn call<T: Backend>(self, backend: &T) -> Self::Output;
 }
 
 #[cfg(feature = "backend-llvm")]
@@ -67,9 +77,9 @@ impl BackendEnum {
     pub fn call_with<F: CallWithBackend>(self, f: F) -> F::Output {
         match self {
             #[cfg(feature = "backend-llvm")]
-            Self::Llvm => f.call::<llvm::BackendImpl>(),
+            Self::Llvm => f.call(&llvm::BackendImpl),
             #[cfg(feature = "backend-no-op")]
-            Self::NoOp => f.call::<no_op::BackendImpl>(),
+            Self::NoOp => f.call(&no_op::BackendImpl),
         }
     }
 }
@@ -85,5 +95,26 @@ impl Default for BackendEnum {
                 compile_error!("no selected backend, you need to enable one of the backend-* features")
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_create_context() {
+        struct MyFn;
+        impl CallWithBackend for MyFn {
+            type Output = ();
+            fn call<T: Backend>(self, backend: &T) -> Self::Output {
+                backend.with_context(self)
+            }
+        }
+        impl<B: Backend> CallWithContext<B> for MyFn {
+            type Output = ();
+            fn call<'ctx, C: ContextRef<'ctx>>(self, backend: &B, context: C) -> Self::Output {}
+        }
+        BackendEnum::default().call_with(MyFn);
     }
 }

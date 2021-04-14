@@ -15,6 +15,11 @@ use inkwell::{
 )))]
 compile_error!("a cargo feature for specific LLVM version needs to be enabled, e.g. enable feature backend-llvm-11");
 
+#[derive(Debug)]
+pub struct CompiledCode {}
+
+impl backend::CompiledCode for CompiledCode {}
+
 impl<'ctx> backend::Type<'ctx> for AnyTypeEnum<'ctx> {}
 
 impl<'ctx> backend::Type<'ctx> for IntType<'ctx> {}
@@ -35,19 +40,21 @@ macro_rules! impl_context_types {
     ) => {
         $(
             type $type = $ty;
-            fn $fn(&$ctx self) -> Self::$type {
+            fn $fn(self) -> Self::$type {
                 self.context.$fn()
             }
         )*
     };
 }
 
-impl<'ctx> backend::Context<'ctx> for ContextImpl<'ctx> {
+impl<'ctx> backend::ContextRef<'ctx> for &'ctx ContextImpl<'ctx> {
+    type CompiledCode = CompiledCode;
+
     type Type = AnyTypeEnum<'ctx>;
 
     type BoolType = IntType<'ctx>;
 
-    fn bool_type(&'ctx self) -> Self::BoolType {
+    fn bool_type(self) -> Self::BoolType {
         self.context.custom_width_int_type(1)
     }
 
@@ -72,31 +79,29 @@ impl<'ctx> backend::Context<'ctx> for ContextImpl<'ctx> {
 
     type ISizeType = IntType<'ctx>;
 
-    fn isize_type(&'ctx self) -> Self::ISizeType {
+    fn isize_type(self) -> Self::ISizeType {
         self.context.ptr_sized_int_type(&self.target_data, None)
     }
-
-    type TypeTryFromError = ();
 }
 
 #[derive(Copy, Clone, Debug)]
 pub struct BackendImpl;
 
-impl<'ctx> backend::BackendCreateContext<'ctx> for BackendImpl {
-    type Context = ContextImpl<'ctx>;
-    type ContextInner = Context;
-
-    fn create_context_inner() -> Self::ContextInner {
-        Context::create()
-    }
-
-    fn create_context(inner: &'ctx Self::ContextInner) -> Self::Context {
-        let context = inner;
-        ContextImpl {
-            context,
-            target_data: todo!(),
-        }
-    }
+fn make_target_data() -> TargetData {
+    todo!()
 }
 
-impl backend::Backend for BackendImpl {}
+impl backend::Backend for BackendImpl {
+    type CompiledCode = CompiledCode;
+
+    fn with_context<F: backend::CallWithContext<Self>>(&self, f: F) -> F::Output {
+        let context = Context::create();
+        f.call(
+            self,
+            &ContextImpl {
+                context: &context,
+                target_data: make_target_data(),
+            },
+        )
+    }
+}
