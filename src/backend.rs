@@ -1,58 +1,58 @@
 // SPDX-License-Identifier: LGPL-2.1-or-later
 // See Notices.txt for copyright information
 
-use core::{convert::TryFrom, fmt};
+use core::fmt;
 
 pub trait CompiledCode: fmt::Debug + 'static + Send + Sync {}
 
-pub trait Type<'ctx>: fmt::Debug + Clone {}
+pub trait TypeRef: fmt::Debug + Copy {}
 
 macro_rules! impl_context_types {
     (
-        impl<$ctx:lifetime> {
-            $(fn $type_fn:ident() -> Self::$type:ident;)*
-        }
+        $(fn $type_fn:ident() -> Self::$type:ident;)*
     ) => {
-        type Type: Type<$ctx> $(+ From<Self::$type>)*;
+        type Type: TypeRef $(+ From<Self::$type>)*;
         $(
-            type $type: Type<$ctx>;
+            type $type: TypeRef;
             fn $type_fn(self) -> Self::$type;
         )*
     };
 }
 
-pub trait ContextRef<'ctx>: fmt::Debug + Copy + 'ctx {
-    type CompiledCode: CompiledCode;
+pub trait ContextRef: fmt::Debug + Copy {
     impl_context_types! {
-        impl<'ctx> {
-            fn bool_type() -> Self::BoolType;
-            fn f32_type() -> Self::F32Type;
-            fn f64_type() -> Self::F64Type;
-            fn i8_type() -> Self::I8Type;
-            fn i16_type() -> Self::I16Type;
-            fn i32_type() -> Self::I32Type;
-            fn i64_type() -> Self::I64Type;
-            fn i128_type() -> Self::I128Type;
-            fn isize_type() -> Self::ISizeType;
-        }
+        fn bool_type() -> Self::BoolType;
+        fn f32_type() -> Self::F32Type;
+        fn f64_type() -> Self::F64Type;
+        fn i8_type() -> Self::I8Type;
+        fn i16_type() -> Self::I16Type;
+        fn i32_type() -> Self::I32Type;
+        fn i64_type() -> Self::I64Type;
+        fn i128_type() -> Self::I128Type;
+        fn isize_type() -> Self::ISizeType;
     }
 }
 
-pub trait CallWithContext<B>
-where
-    B: Backend,
-{
+pub trait CallWithContext {
     type Output;
-    fn call<'ctx, C: ContextRef<'ctx, CompiledCode = B::CompiledCode>>(
+    fn call_with_context<ContextT: ContextRef>(self, context: ContextT) -> Self::Output;
+}
+
+pub trait CompilerRef: fmt::Debug + Copy {
+    fn with_context<F: CallWithContext>(self, f: F) -> F::Output;
+}
+
+pub trait CallWithCompiler {
+    type Error;
+    fn call_with_compiler<CompilerT: CompilerRef>(
         self,
-        backend: &B,
-        context: C,
-    ) -> Self::Output;
+        compiler: CompilerT,
+    ) -> Result<(), Self::Error>;
 }
 
 pub trait Backend: Clone + Send + Sync + 'static + fmt::Debug {
     type CompiledCode: CompiledCode;
-    fn with_context<F: CallWithContext<Self>>(&self, f: F) -> F::Output;
+    fn with_compiler<F: CallWithCompiler>(&self, f: F) -> Result<Self::CompiledCode, F::Error>;
 }
 
 pub trait CallWithBackend {
@@ -102,19 +102,39 @@ impl Default for BackendEnum {
 mod tests {
     use super::*;
 
-    #[test]
-    fn test_create_context() {
+    mod test_create_context {
+        use super::*;
+
         struct MyFn;
+
         impl CallWithBackend for MyFn {
             type Output = ();
             fn call<T: Backend>(self, backend: &T) -> Self::Output {
-                backend.with_context(self)
+                backend.with_compiler(self).unwrap_err()
             }
         }
-        impl<B: Backend> CallWithContext<B> for MyFn {
-            type Output = ();
-            fn call<'ctx, C: ContextRef<'ctx>>(self, backend: &B, context: C) -> Self::Output {}
+
+        impl CallWithCompiler for MyFn {
+            type Error = ();
+
+            fn call_with_compiler<CompilerT: CompilerRef>(
+                self,
+                compiler: CompilerT,
+            ) -> Result<(), Self::Error> {
+                compiler.with_context(self);
+                Err(())
+            }
         }
-        BackendEnum::default().call_with(MyFn);
+
+        impl CallWithContext for MyFn {
+            type Output = ();
+
+            fn call_with_context<ContextT: ContextRef>(self, context: ContextT) -> Self::Output {}
+        }
+
+        #[test]
+        fn test_create_context() {
+            BackendEnum::default().call_with(MyFn);
+        }
     }
 }

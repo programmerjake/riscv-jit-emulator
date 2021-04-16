@@ -1,8 +1,10 @@
 // SPDX-License-Identifier: LGPL-2.1-or-later
 // See Notices.txt for copyright information
 #![no_std]
+#![deny(unsafe_op_in_unsafe_fn)]
 
 extern crate alloc;
+#[cfg(feature = "std")]
 extern crate std;
 
 pub mod backend;

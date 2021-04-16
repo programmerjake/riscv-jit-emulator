@@ -1,107 +1,129 @@
 // SPDX-License-Identifier: LGPL-2.1-or-later
 // See Notices.txt for copyright information
-use crate::backend;
-use inkwell::{
-    context::Context,
-    targets::TargetData,
-    types::{AnyTypeEnum, FloatType, IntType},
-};
 
-#[cfg(not(any(
-    feature = "backend-llvm-11",
-    feature = "backend-llvm-10",
-    feature = "backend-llvm-9",
-    feature = "backend-llvm-8"
-)))]
-compile_error!("a cargo feature for specific LLVM version needs to be enabled, e.g. enable feature backend-llvm-11");
+use crate::backend;
+use alloc::vec::Vec;
+use core::{cell::UnsafeCell, fmt, mem::ManuallyDrop};
+
+mod wrappers;
+
+use wrappers::{LlvmContext, Own, Ref};
+
+struct CompilerData {
+    /// `execution_engine` must be dropped before `contexts`
+    execution_engine: ManuallyDrop<Own<wrappers::LlvmExecutionEngine>>,
+    /// only used on a single thread before compilation, not accessed after compilation,
+    /// just to keep the contexts live since LLVM uses them internally.
+    contexts: UnsafeCell<Vec<Own<wrappers::LlvmContext>>>,
+}
+
+impl Drop for CompilerData {
+    fn drop(&mut self) {
+        unsafe { ManuallyDrop::drop(&mut self.execution_engine) }
+    }
+}
+
+impl fmt::Debug for CompilerData {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "CompilerData {{ ... }}")
+    }
+}
 
 #[derive(Debug)]
-pub struct CompiledCode {}
+pub struct CompiledCode {
+    compiler_data: CompilerData,
+}
+
+unsafe impl Send for CompiledCode {}
+
+unsafe impl Sync for CompiledCode {}
 
 impl backend::CompiledCode for CompiledCode {}
 
-impl<'ctx> backend::Type<'ctx> for AnyTypeEnum<'ctx> {}
+#[derive(Debug, Copy, Clone)]
+pub struct TypeRef<'compiler, 'ctx>(Ref<'ctx, wrappers::LlvmType<'compiler>>);
 
-impl<'ctx> backend::Type<'ctx> for IntType<'ctx> {}
+impl<'compiler, 'ctx> backend::TypeRef for TypeRef<'compiler, 'ctx> {}
 
-impl<'ctx> backend::Type<'ctx> for FloatType<'ctx> {}
-
-#[derive(Debug)]
-pub struct ContextImpl<'ctx> {
-    context: &'ctx Context,
-    target_data: TargetData,
+#[derive(Debug, Clone, Copy)]
+pub struct ContextRef<'compiler, 'ctx> {
+    context: Ref<'ctx, wrappers::LlvmContext>,
+    code: &'compiler CompilerData,
 }
 
-macro_rules! impl_context_types {
-    (
-        impl<$ctx:lifetime> {
-            $(#[type = $type:ident] fn $fn:ident() -> $ty:ty;)*
-        }
-    ) => {
-        $(
-            type $type = $ty;
-            fn $fn(self) -> Self::$type {
-                self.context.$fn()
-            }
-        )*
-    };
-}
+impl<'compiler, 'ctx> backend::ContextRef for ContextRef<'compiler, 'ctx> {
+    type Type = TypeRef<'compiler, 'ctx>;
 
-impl<'ctx> backend::ContextRef<'ctx> for &'ctx ContextImpl<'ctx> {
-    type CompiledCode = CompiledCode;
-
-    type Type = AnyTypeEnum<'ctx>;
-
-    type BoolType = IntType<'ctx>;
+    type BoolType = TypeRef<'compiler, 'ctx>;
 
     fn bool_type(self) -> Self::BoolType {
-        self.context.custom_width_int_type(1)
+        todo!()
     }
 
-    impl_context_types! {
-        impl<'ctx> {
-            #[type = F32Type]
-            fn f32_type() -> FloatType<'ctx>;
-            #[type = F64Type]
-            fn f64_type() -> FloatType<'ctx>;
-            #[type = I8Type]
-            fn i8_type() -> IntType<'ctx>;
-            #[type = I16Type]
-            fn i16_type() -> IntType<'ctx>;
-            #[type = I32Type]
-            fn i32_type() -> IntType<'ctx>;
-            #[type = I64Type]
-            fn i64_type() -> IntType<'ctx>;
-            #[type = I128Type]
-            fn i128_type() -> IntType<'ctx>;
-        }
+    type F32Type = TypeRef<'compiler, 'ctx>;
+
+    fn f32_type(self) -> Self::F32Type {
+        todo!()
     }
 
-    type ISizeType = IntType<'ctx>;
+    type F64Type = TypeRef<'compiler, 'ctx>;
+
+    fn f64_type(self) -> Self::F64Type {
+        todo!()
+    }
+
+    type I8Type = TypeRef<'compiler, 'ctx>;
+
+    fn i8_type(self) -> Self::I8Type {
+        todo!()
+    }
+
+    type I16Type = TypeRef<'compiler, 'ctx>;
+
+    fn i16_type(self) -> Self::I16Type {
+        todo!()
+    }
+
+    type I32Type = TypeRef<'compiler, 'ctx>;
+
+    fn i32_type(self) -> Self::I32Type {
+        todo!()
+    }
+
+    type I64Type = TypeRef<'compiler, 'ctx>;
+
+    fn i64_type(self) -> Self::I64Type {
+        todo!()
+    }
+
+    type I128Type = TypeRef<'compiler, 'ctx>;
+
+    fn i128_type(self) -> Self::I128Type {
+        todo!()
+    }
+
+    type ISizeType = TypeRef<'compiler, 'ctx>;
 
     fn isize_type(self) -> Self::ISizeType {
-        self.context.ptr_sized_int_type(&self.target_data, None)
+        todo!()
     }
 }
 
 #[derive(Copy, Clone, Debug)]
 pub struct BackendImpl;
 
-fn make_target_data() -> TargetData {
-    todo!()
-}
-
 impl backend::Backend for BackendImpl {
     type CompiledCode = CompiledCode;
 
-    fn with_context<F: backend::CallWithContext<Self>>(&self, f: F) -> F::Output {
-        let context = Context::create();
-        f.call(
-            self,
-            &ContextImpl {
-                context: &context,
-                target_data: make_target_data(),
-            },
-        )
+    fn with_compiler<F: backend::CallWithCompiler>(
+        &self,
+        f: F,
+    ) -> Result<Self::CompiledCode, F::Error> {
+        let context = LlvmContext::new();
+        let compiler_data = CompilerData {
+            execution_engine: todo!(),
+            contexts: UnsafeCell::new(Vec::new()),
+        };
+        todo!()
     }
 }

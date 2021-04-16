@@ -12,19 +12,20 @@ description = "WIP emulator for riscv that jit-compiles code -- the intention is
 exclude = ["/.vscode"]
 
 [features]
-default = ["backend-llvm-11", "backend-no-op"]
+default = ["backend-llvm-11", "default-no-llvm"]
+std = []
+default-no-llvm = ["backend-no-op"]
 backend-no-op = []
-backend-llvm = ["inkwell"]
-backend-llvm-11 = ["inkwell/llvm11-0", "backend-llvm"]
-backend-llvm-10 = ["inkwell/llvm10-0", "backend-llvm"]
-backend-llvm-9 = ["inkwell/llvm9-0", "backend-llvm"]
-backend-llvm-8 = ["inkwell/llvm8-0", "backend-llvm"]
+backend-llvm = ["std"]
+backend-llvm-11 = ["llvm-sys-11", "backend-llvm"]
+backend-llvm-10 = ["llvm-sys-10", "backend-llvm"]
 
 [dependencies]
 goblin = { version = "0.3.4", default-features = false, features = ["elf32", "elf64", "alloc", "endian_fd"] }
 twoway = { version = "0.2.1", default-features = false, features = [] }
 hashbrown = "0.11.2"
-inkwell = { version = "=0.1.0-beta.2", optional = true }
+llvm-sys-10 = { package = "llvm-sys", version = "100.2", optional = true }
+llvm-sys-11 = { package = "llvm-sys", version = "110.0", optional = true }
 cfg-if = "1.0"
 
 [build-dependencies]
