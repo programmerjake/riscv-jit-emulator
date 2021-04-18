@@ -2,6 +2,7 @@
 // See Notices.txt for copyright information
 
 use crate::backend;
+use alloc::string::String;
 use core::marker::PhantomData;
 
 #[derive(Debug)]
@@ -20,7 +21,7 @@ impl backend::CompiledCode for CompiledCode {}
 pub struct CompilerRef<'compiler>(&'compiler Code);
 
 impl<'compiler> backend::CompilerRef for CompilerRef<'compiler> {
-    fn with_context<F: backend::CallWithContext>(self, f: F) -> F::Output {
+    fn with_context<F: backend::CallWithContext>(self, f: F) -> Result<F::Output, F::Error> {
         let context = Context(self);
         f.call_with_context(ContextRef(&context))
     }
@@ -88,6 +89,31 @@ impl<'compiler, 'ctx> backend::ContextRef for ContextRef<'compiler, 'ctx> {
     fn isize_type(self) -> Self::ISizeType {
         TypeRef(PhantomData)
     }
+
+    type Module = Module<'compiler, 'ctx>;
+
+    fn create_module(self, name: &str) -> Self::Module {
+        Module {
+            context: self,
+            name: name.into(),
+        }
+    }
+}
+
+#[derive(Debug)]
+pub struct Module<'compiler, 'ctx> {
+    name: String,
+    context: ContextRef<'compiler, 'ctx>,
+}
+
+impl<'compiler, 'ctx> backend::Module for Module<'compiler, 'ctx> {
+    type ContextRef = ContextRef<'compiler, 'ctx>;
+
+    fn context(&self) -> Self::ContextRef {
+        self.context
+    }
+
+    fn submit_for_compilation(self) {}
 }
 
 #[derive(Debug, Copy, Clone)]
@@ -103,6 +129,7 @@ impl backend::Backend for BackendImpl {
 
     fn with_compiler<F: backend::CallWithCompiler>(
         &self,
+        _optimization_level: backend::OptimizationLevel,
         f: F,
     ) -> Result<Self::CompiledCode, F::Error> {
         let code = Code(());

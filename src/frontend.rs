@@ -11,7 +11,7 @@ use core::{
 use goblin::elf::{header, program_header, Elf, Reloc};
 use instruction_iterator::InstructionIterator;
 use memory_map::MemoryMap;
-#[cfg(feature = "std")]
+#[cfg(any(test, feature = "std"))]
 use std::{dbg, println};
 
 #[derive(Debug)]
@@ -107,16 +107,16 @@ impl<'a> Binary<'a> {
             );
             memory_map.map_range_to_bytes(address_range, bytes)?;
         }
-        #[cfg(feature = "std")]
+        #[cfg(any(test, feature = "std"))]
         dbg!(&memory_map);
         for (address, instruction) in (InstructionIterator {
             address: elf.header.e_entry,
             memory_map: &memory_map,
         }) {
-            #[cfg(feature = "std")]
+            #[cfg(any(test, feature = "std"))]
             println!("0x{:04X}: {:?}", address, instruction);
         }
-        #[cfg(feature = "std")]
+        #[cfg(any(test, feature = "std"))]
         dbg!(&elf.dynsyms);
         todo!()
     }

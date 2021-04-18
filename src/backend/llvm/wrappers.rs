@@ -1,14 +1,22 @@
 // SPDX-License-Identifier: LGPL-2.1-or-later
 // See Notices.txt for copyright information
 
-use core::{fmt, marker::PhantomData, mem, ops::Deref, ptr::NonNull};
-use std::{ffi::CStr, os::raw::c_char};
+use core::{
+    fmt,
+    marker::PhantomData,
+    mem,
+    ops::Deref,
+    ptr::{self, NonNull},
+};
+use std::{
+    ffi::CStr,
+    os::raw::{c_char, c_uint},
+};
 
-use llvm_sys::core::LLVMPrintTypeToString;
 #[cfg(feature = "backend-llvm-10")]
-use llvm_sys_10 as llvm_sys;
+pub(super) use llvm_sys_10 as llvm_sys;
 #[cfg(feature = "backend-llvm-11")]
-use llvm_sys_11 as llvm_sys;
+pub(super) use llvm_sys_11 as llvm_sys;
 
 #[cfg(not(any(feature = "backend-llvm-11", feature = "backend-llvm-10")))]
 compile_error!("a cargo feature for specific LLVM version needs to be enabled, e.g. enable feature backend-llvm-11");
@@ -16,6 +24,12 @@ compile_error!("a cargo feature for specific LLVM version needs to be enabled, e
 pub(crate) unsafe trait Wrap: Sized {
     type Pointee: ?Sized;
     type PhantomData;
+}
+
+pub(crate) unsafe trait WrapTransmuteLifetimes<Other>: Wrap
+where
+    Other: Wrap<Pointee = Self::Pointee>,
+{
 }
 
 pub(crate) unsafe trait WrapSync: Wrap {}
@@ -61,6 +75,12 @@ impl<T: WrapOwned> Own<T> {
     }
     pub(crate) fn as_ref<'a>(&'a self) -> Ref<'a, T> {
         unsafe { mem::transmute_copy::<Own<T>, Ref<'a, T>>(self) }
+    }
+    pub(crate) unsafe fn transmute_lifetimes<Other>(self) -> Own<Other>
+    where
+        Other: Wrap<Pointee = T::Pointee> + WrapOwned + WrapTransmuteLifetimes<T>,
+    {
+        unsafe { Own::from_raw_non_null(self.into_raw_non_null()) }
     }
 }
 
@@ -134,6 +154,12 @@ impl<'a, T: Wrap> Ref<'a, T> {
     {
         T::do_clone(self)
     }
+    pub(crate) unsafe fn transmute_lifetimes<'other, Other>(self) -> Ref<'other, Other>
+    where
+        Other: Wrap<Pointee = T::Pointee> + WrapTransmuteLifetimes<T>,
+    {
+        Ref(self.0, PhantomData)
+    }
 }
 
 impl<T: Wrap> Copy for Ref<'_, T> {}
@@ -172,26 +198,28 @@ unsafe impl<T: WrapSync> Send for Ref<'_, T> {}
 
 unsafe impl<T: WrapSync> Sync for Ref<'_, T> {}
 
-pub(crate) struct LlvmContext;
+pub(crate) struct LlvmContext<'compiler>(PhantomData<&'compiler ()>);
 
-unsafe impl Wrap for LlvmContext {
+unsafe impl<'compiler> Wrap for LlvmContext<'compiler> {
     type Pointee = llvm_sys::LLVMContext;
     type PhantomData = ();
 }
 
-impl WrapOwned for LlvmContext {
+unsafe impl WrapTransmuteLifetimes<LlvmContext<'_>> for LlvmContext<'_> {}
+
+impl<'compiler> WrapOwned for LlvmContext<'compiler> {
     unsafe fn do_drop(v: NonNull<Self::Pointee>) {
         unsafe { llvm_sys::core::LLVMContextDispose(v.as_ptr()) }
     }
 }
 
-impl LlvmContext {
+impl<'compiler> LlvmContext<'compiler> {
     pub(crate) fn new() -> Own<Self> {
         unsafe { Own::from_raw_ptr(llvm_sys::core::LLVMContextCreate()) }
     }
 }
 
-impl fmt::Debug for Ref<'_, LlvmContext> {
+impl fmt::Debug for Ref<'_, LlvmContext<'_>> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         self.as_raw_non_null().fmt(f)
     }
@@ -274,6 +302,37 @@ impl fmt::Debug for Ref<'_, LlvmExecutionEngine> {
     }
 }
 
+impl LlvmExecutionEngine {
+    pub(crate) unsafe fn create_jit(
+        module: Own<LlvmModule<'_, '_>>,
+        optimization_level: c_uint,
+    ) -> Result<Own<Self>, Own<LlvmString>> {
+        let mut execution_engine = ptr::null_mut();
+        let mut error = ptr::null_mut();
+        unsafe {
+            if llvm_sys::execution_engine::LLVMCreateJITCompilerForModule(
+                &mut execution_engine,
+                module.into_raw_ptr(),
+                optimization_level,
+                &mut error,
+            ) != 0
+            {
+                Err(Own::from_raw_ptr(error))
+            } else {
+                Ok(Own::from_raw_ptr(execution_engine))
+            }
+        }
+    }
+    pub(crate) unsafe fn add_module<'compiler, 'ctx>(
+        this: Ref<'compiler, Self>,
+        module: Own<LlvmModule<'compiler, 'ctx>>,
+    ) {
+        unsafe {
+            llvm_sys::execution_engine::LLVMAddModule(this.as_raw_ptr(), module.into_raw_ptr())
+        }
+    }
+}
+
 pub(crate) struct LlvmGenericValue;
 
 unsafe impl Wrap for LlvmGenericValue {
@@ -303,12 +362,108 @@ unsafe impl<'compiler> Wrap for LlvmType<'compiler> {
 
 impl Ref<'_, LlvmType<'_>> {
     pub(crate) fn to_string(self) -> Own<LlvmString> {
-        unsafe { Own::from_raw_ptr(LLVMPrintTypeToString(self.as_raw_ptr())) }
+        unsafe { Own::from_raw_ptr(llvm_sys::core::LLVMPrintTypeToString(self.as_raw_ptr())) }
     }
 }
 
 impl fmt::Debug for Ref<'_, LlvmType<'_>> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.debug_tuple("LlvmType").field(&self.to_string()).finish()
+        f.debug_tuple("LlvmType")
+            .field(&DebugAsDisplay(self.to_string()))
+            .finish()
+    }
+}
+
+pub(crate) struct LlvmModule<'compiler, 'ctx>(PhantomData<&'ctx &'compiler ()>);
+
+unsafe impl<'compiler, 'ctx> Wrap for LlvmModule<'compiler, 'ctx> {
+    type Pointee = llvm_sys::LLVMModule;
+
+    type PhantomData = &'ctx &'compiler ();
+}
+
+unsafe impl WrapTransmuteLifetimes<LlvmModule<'_, '_>> for LlvmModule<'_, '_> {}
+
+impl<'compiler, 'ctx> LlvmModule<'compiler, 'ctx> {
+    pub(crate) fn new(
+        context: Ref<'ctx, LlvmContext<'compiler>>,
+        name: impl AsRef<CStr>,
+    ) -> Own<LlvmModule<'compiler, 'ctx>> {
+        unsafe {
+            Own::from_raw_ptr(llvm_sys::core::LLVMModuleCreateWithNameInContext(
+                name.as_ref().as_ptr(),
+                context.as_raw_ptr(),
+            ))
+        }
+    }
+}
+
+impl Ref<'_, LlvmModule<'_, '_>> {
+    pub(crate) fn to_string(self) -> Own<LlvmString> {
+        unsafe { Own::from_raw_ptr(llvm_sys::core::LLVMPrintModuleToString(self.as_raw_ptr())) }
+    }
+}
+
+impl WrapOwned for LlvmModule<'_, '_> {
+    unsafe fn do_drop(v: NonNull<Self::Pointee>) {
+        unsafe { llvm_sys::core::LLVMDisposeModule(v.as_ptr()) }
+    }
+}
+
+struct DebugAsDisplay<T: ?Sized>(T);
+
+impl<T: ?Sized + fmt::Display> fmt::Debug for DebugAsDisplay<T> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        self.0.fmt(f)
+    }
+}
+
+impl fmt::Debug for Ref<'_, LlvmModule<'_, '_>> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_tuple("LlvmModule")
+            .field(&DebugAsDisplay(self.to_string()))
+            .finish()
+    }
+}
+
+pub(crate) struct LlvmTargetData;
+
+unsafe impl Wrap for LlvmTargetData {
+    type Pointee = llvm_sys::target::LLVMOpaqueTargetData;
+
+    type PhantomData = ();
+}
+
+impl WrapOwned for LlvmTargetData {
+    unsafe fn do_drop(v: NonNull<Self::Pointee>) {
+        unsafe { llvm_sys::target::LLVMDisposeTargetData(v.as_ptr()) }
+    }
+}
+
+impl LlvmTargetData {
+    pub(crate) fn new(layout_string: impl AsRef<CStr>) -> Own<Self> {
+        unsafe {
+            Own::from_raw_ptr(llvm_sys::target::LLVMCreateTargetData(
+                layout_string.as_ref().as_ptr(),
+            ))
+        }
+    }
+}
+
+impl Ref<'_, LlvmTargetData> {
+    pub(crate) fn to_string(self) -> Own<LlvmString> {
+        unsafe {
+            Own::from_raw_ptr(llvm_sys::target::LLVMCopyStringRepOfTargetData(
+                self.as_raw_ptr(),
+            ))
+        }
+    }
+}
+
+impl fmt::Debug for Ref<'_, LlvmTargetData> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_tuple("DataLayout")
+            .field(&self.to_string())
+            .finish()
     }
 }
