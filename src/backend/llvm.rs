@@ -94,7 +94,7 @@ impl<'compiler, 'ctx> backend::Module for Module<'compiler, 'ctx> {
 #[derive(Debug, Clone, Copy)]
 pub struct ContextRef<'compiler, 'ctx> {
     context: Ref<'ctx, wrappers::LlvmContext<'compiler>>,
-    execution_engine: &'compiler ExecutionEngine,
+    compiler: &'compiler Compiler,
     target_data: Ref<'ctx, wrappers::LlvmTargetData>,
     submitted_modules: &'ctx RefCell<Vec<Own<wrappers::LlvmModule<'static, 'static>>>>,
     _phantom: PhantomData<&'ctx mut ()>,
@@ -200,22 +200,24 @@ impl<'compiler: 'ctx, 'ctx> backend::ContextRef for ContextRef<'compiler, 'ctx> 
 
     fn create_module(self, name: &str) -> Self::Module {
         let name = CString::new(name).unwrap();
+        let module = wrappers::LlvmModule::new(self.context, name);
+        module.as_ref().set_data_layout(&self.compiler.target_data);
+        module
+            .as_ref()
+            .set_target_triple(&self.compiler.target_triple);
         Module {
-            module: wrappers::LlvmModule::new(self.context, name),
+            module,
             context: self,
         }
     }
 }
 
 #[derive(Copy, Clone, Debug)]
-pub struct CompilerRef<'compiler> {
-    execution_engine: &'compiler ExecutionEngine,
-    target_data: Ref<'compiler, wrappers::LlvmString>,
-}
+pub struct CompilerRef<'compiler>(&'compiler Compiler);
 
 struct ContextWithoutDrop<'compiler> {
     context: Own<wrappers::LlvmContext<'compiler>>,
-    execution_engine: &'compiler ExecutionEngine,
+    compiler: &'compiler Compiler,
     target_data: Own<wrappers::LlvmTargetData>,
     // must be dropped before `context`
     submitted_modules: RefCell<Vec<Own<wrappers::LlvmModule<'static, 'static>>>>,
@@ -228,15 +230,15 @@ impl<'compiler> Context<'compiler> {
     fn new(compiler_ref: CompilerRef<'compiler>) -> Self {
         Self(ContextWithoutDrop {
             context: wrappers::LlvmContext::new(),
-            execution_engine: compiler_ref.execution_engine,
-            target_data: wrappers::LlvmTargetData::new(&compiler_ref.target_data),
+            compiler: compiler_ref.0,
+            target_data: wrappers::LlvmTargetData::new(&compiler_ref.0.target_data),
             submitted_modules: Default::default(),
         })
     }
     fn as_ref<'ctx>(&'ctx self) -> ContextRef<'compiler, 'ctx> {
         ContextRef {
             context: self.0.context.as_ref(),
-            execution_engine: self.0.execution_engine,
+            compiler: self.0.compiler,
             target_data: self.0.target_data.as_ref(),
             submitted_modules: &self.0.submitted_modules,
             _phantom: PhantomData,
@@ -263,16 +265,17 @@ impl<'compiler> backend::CompilerRef for CompilerRef<'compiler> {
         unsafe {
             let ContextWithoutDrop {
                 context,
-                execution_engine,
+                compiler,
                 target_data: _,
                 submitted_modules,
             } = context.into_context_without_drop();
-            execution_engine.add_context(context);
+            compiler.execution_engine.add_context(context);
             for submitted_module in submitted_modules.into_inner() {
-                wrappers::LlvmExecutionEngine::add_module(
-                    execution_engine.execution_engine.as_ref(),
-                    submitted_module.transmute_lifetimes(),
-                );
+                compiler
+                    .execution_engine
+                    .execution_engine
+                    .as_ref()
+                    .add_module(submitted_module.transmute_lifetimes());
             }
         }
         Ok(retval)
@@ -284,17 +287,19 @@ pub fn get_llvm_initialization_lock() -> &'static Mutex<()> {
     &LOCK
 }
 
-#[derive(Copy, Clone, Debug)]
-pub struct BackendImpl;
+#[derive(Debug)]
+struct Compiler {
+    execution_engine: ExecutionEngine,
+    target_data: Own<wrappers::LlvmString>,
+    target_triple: Own<wrappers::LlvmString>,
+    target_cpu: Own<wrappers::LlvmString>,
+    target_feature_string: Own<wrappers::LlvmString>,
+}
 
-impl backend::Backend for BackendImpl {
-    type CompiledCode = CompiledCode;
-
-    fn with_compiler<F: backend::CallWithCompiler>(
-        &self,
+impl Compiler {
+    unsafe fn new<E: BackendError>(
         optimization_level: backend::OptimizationLevel,
-        f: F,
-    ) -> Result<Self::CompiledCode, F::Error> {
+    ) -> Result<Self, E> {
         let optimization_level = match optimization_level {
             backend::OptimizationLevel::Debug => 0,
             backend::OptimizationLevel::Release => 2,
@@ -307,9 +312,7 @@ impl backend::Backend for BackendImpl {
             );
             if llvm_sys::target::LLVM_InitializeNativeTarget() == 1 {
                 drop(_lock);
-                return Err(F::Error::from_message(
-                    "failed to initialize LLVM native target",
-                ));
+                return Err(E::from_message("failed to initialize LLVM native target"));
             }
             llvm_sys::execution_engine::LLVMLinkInMCJIT();
         }
@@ -323,25 +326,56 @@ impl backend::Backend for BackendImpl {
             );
             execution_engine = ManuallyDrop::new(
                 wrappers::LlvmExecutionEngine::create_jit(module, optimization_level)
-                    .map_err(|e| F::Error::from_error(e))?,
+                    .map_err(|e| E::from_error(e))?,
             );
         }
         let execution_engine = ExecutionEngine {
             execution_engine,
             contexts,
         };
-        let target_data = unsafe {
-            Ref::<wrappers::LlvmTargetData>::from_raw_ptr(
-                llvm_sys::execution_engine::LLVMGetExecutionEngineTargetData(
-                    execution_engine.execution_engine.as_raw_ptr(),
-                ),
-            )
-            .to_string()
-        };
-        f.call_with_compiler(CompilerRef {
-            execution_engine: &execution_engine,
-            target_data: target_data.as_ref(),
-        })?;
-        Ok(CompiledCode { execution_engine })
+        let target_data: Own<wrappers::LlvmString>;
+        let target_triple: Own<wrappers::LlvmString>;
+        let target_cpu: Own<wrappers::LlvmString>;
+        let target_feature_string: Own<wrappers::LlvmString>;
+        unsafe {
+            target_data = execution_engine
+                .execution_engine
+                .as_ref()
+                .target_data()
+                .to_string();
+            let target_machine = execution_engine.execution_engine.as_ref().target_machine();
+            target_triple = target_machine.triple();
+            target_cpu = target_machine.cpu();
+            target_feature_string = target_machine.feature_string();
+        }
+        Ok(Compiler {
+            execution_engine,
+            target_data,
+            target_triple,
+            target_cpu,
+            target_feature_string,
+        })
+    }
+    fn finish<E: BackendError>(self) -> Result<CompiledCode, E> {
+        Ok(CompiledCode {
+            execution_engine: self.execution_engine,
+        })
+    }
+}
+
+#[derive(Copy, Clone, Debug)]
+pub struct BackendImpl;
+
+impl backend::Backend for BackendImpl {
+    type CompiledCode = CompiledCode;
+
+    fn with_compiler<F: backend::CallWithCompiler>(
+        &self,
+        optimization_level: backend::OptimizationLevel,
+        f: F,
+    ) -> Result<Self::CompiledCode, F::Error> {
+        let compiler = unsafe { Compiler::new(optimization_level) }?;
+        f.call_with_compiler(CompilerRef(&compiler))?;
+        compiler.finish()
     }
 }

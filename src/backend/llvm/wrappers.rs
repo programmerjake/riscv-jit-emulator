@@ -261,12 +261,6 @@ impl fmt::Display for Ref<'_, LlvmString> {
 unsafe impl WrapSend for LlvmString {}
 unsafe impl WrapSync for LlvmString {}
 
-impl LlvmString {
-    pub(crate) fn new<T: AsRef<CStr>>(value: T) -> Own<Self> {
-        unsafe { Own::from_raw_ptr(llvm_sys::core::LLVMCreateMessage(value.as_ref().as_ptr())) }
-    }
-}
-
 impl AsRef<CStr> for Ref<'_, LlvmString> {
     fn as_ref(&self) -> &CStr {
         self
@@ -323,12 +317,26 @@ impl LlvmExecutionEngine {
             }
         }
     }
-    pub(crate) unsafe fn add_module<'compiler, 'ctx>(
-        this: Ref<'compiler, Self>,
-        module: Own<LlvmModule<'compiler, 'ctx>>,
-    ) {
+}
+
+impl<'compiler> Ref<'compiler, LlvmExecutionEngine> {
+    pub(crate) unsafe fn add_module<'ctx>(self, module: Own<LlvmModule<'compiler, 'ctx>>) {
         unsafe {
-            llvm_sys::execution_engine::LLVMAddModule(this.as_raw_ptr(), module.into_raw_ptr())
+            llvm_sys::execution_engine::LLVMAddModule(self.as_raw_ptr(), module.into_raw_ptr())
+        }
+    }
+    pub(crate) unsafe fn target_machine(self) -> Ref<'compiler, LlvmTargetMachine> {
+        unsafe {
+            Ref::from_raw_ptr(
+                llvm_sys::execution_engine::LLVMGetExecutionEngineTargetMachine(self.as_raw_ptr()),
+            )
+        }
+    }
+    pub(crate) unsafe fn target_data(self) -> Ref<'compiler, LlvmTargetData> {
+        unsafe {
+            Ref::from_raw_ptr(
+                llvm_sys::execution_engine::LLVMGetExecutionEngineTargetData(self.as_raw_ptr()),
+            )
         }
     }
 }
@@ -402,6 +410,12 @@ impl Ref<'_, LlvmModule<'_, '_>> {
     pub(crate) fn to_string(self) -> Own<LlvmString> {
         unsafe { Own::from_raw_ptr(llvm_sys::core::LLVMPrintModuleToString(self.as_raw_ptr())) }
     }
+    pub(crate) fn set_data_layout(self, v: impl AsRef<CStr>) {
+        unsafe { llvm_sys::core::LLVMSetDataLayout(self.as_raw_ptr(), v.as_ref().as_ptr()) }
+    }
+    pub(crate) fn set_target_triple(self, v: impl AsRef<CStr>) {
+        unsafe { llvm_sys::core::LLVMSetTarget(self.as_raw_ptr(), v.as_ref().as_ptr()) }
+    }
 }
 
 impl WrapOwned for LlvmModule<'_, '_> {
@@ -465,5 +479,37 @@ impl fmt::Debug for Ref<'_, LlvmTargetData> {
         f.debug_tuple("DataLayout")
             .field(&self.to_string())
             .finish()
+    }
+}
+
+pub(crate) struct LlvmTargetMachine;
+
+unsafe impl Wrap for LlvmTargetMachine {
+    type Pointee = llvm_sys::target_machine::LLVMOpaqueTargetMachine;
+
+    type PhantomData = ();
+}
+
+impl Ref<'_, LlvmTargetMachine> {
+    pub(crate) fn triple(self) -> Own<LlvmString> {
+        unsafe {
+            Own::from_raw_ptr(llvm_sys::target_machine::LLVMGetTargetMachineTriple(
+                self.as_raw_ptr(),
+            ))
+        }
+    }
+    pub(crate) fn cpu(self) -> Own<LlvmString> {
+        unsafe {
+            Own::from_raw_ptr(llvm_sys::target_machine::LLVMGetTargetMachineCPU(
+                self.as_raw_ptr(),
+            ))
+        }
+    }
+    pub(crate) fn feature_string(self) -> Own<LlvmString> {
+        unsafe {
+            Own::from_raw_ptr(llvm_sys::target_machine::LLVMGetTargetMachineFeatureString(
+                self.as_raw_ptr(),
+            ))
+        }
     }
 }

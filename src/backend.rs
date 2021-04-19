@@ -8,6 +8,8 @@ pub trait CompiledCode: fmt::Debug + 'static + Send + Sync {}
 
 pub trait TypeRef: fmt::Debug + Copy {}
 
+pub trait ValueRef: fmt::Debug + Copy {}
+
 pub trait BackendError: fmt::Display + fmt::Debug + 'static + Send + Sync + Sized {
     fn from_message<T: ToString>(message: T) -> Self;
     #[cfg(any(test, feature = "std"))]
