@@ -2,7 +2,6 @@
 // See Notices.txt for copyright information
 
 use crate::backend;
-use alloc::string::String;
 use core::marker::PhantomData;
 
 #[derive(Debug)]
@@ -94,19 +93,19 @@ impl<'compiler, 'ctx> backend::ContextRef for ContextRef<'compiler, 'ctx> {
 
     type PtrType = TypeRef<'compiler, 'ctx>;
 
-    fn ptr_type(self, target: Self::Type) -> Self::PtrType {
+    fn ptr_type(self, _target: Self::Type) -> Self::PtrType {
         TypeRef(PhantomData)
     }
 
     type StructType = TypeRef<'compiler, 'ctx>;
 
-    fn struct_type(self, fields: &[Self::Type]) -> Self::StructType {
+    fn struct_type(self, _fields: &[Self::Type]) -> Self::StructType {
         TypeRef(PhantomData)
     }
 
     type ArrayType = TypeRef<'compiler, 'ctx>;
 
-    fn array_type(self, element: Self::Type, length: usize) -> Self::ArrayType {
+    fn array_type(self, _element: Self::Type, _length: usize) -> Self::ArrayType {
         TypeRef(PhantomData)
     }
 
@@ -114,25 +113,21 @@ impl<'compiler, 'ctx> backend::ContextRef for ContextRef<'compiler, 'ctx> {
 
     fn fn_ptr_type(
         self,
-        arguments: &[Self::Type],
-        return_type: Option<Self::Type>,
+        _arguments: &[Self::Type],
+        _return_type: Option<Self::Type>,
     ) -> Self::FnPtrType {
         TypeRef(PhantomData)
     }
 
     type Module = Module<'compiler, 'ctx>;
 
-    fn create_module(self, name: &str) -> Self::Module {
-        Module {
-            context: self,
-            name: name.into(),
-        }
+    fn create_module(self, _name: &str) -> Self::Module {
+        Module { context: self }
     }
 }
 
 #[derive(Debug)]
 pub struct Module<'compiler, 'ctx> {
-    name: String,
     context: ContextRef<'compiler, 'ctx>,
 }
 
