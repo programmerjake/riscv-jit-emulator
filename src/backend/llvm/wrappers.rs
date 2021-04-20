@@ -142,6 +142,10 @@ impl<'a, T: Wrap> Ref<'a, T> {
     pub(crate) fn as_raw_ptr(&self) -> *mut T::Pointee {
         self.as_raw_non_null().as_ptr()
     }
+    pub(crate) fn as_slice_of_raw_ptrs<'b>(slice: &'b [Self]) -> &'b [*mut T::Pointee] {
+        // Safety: `Ref` is a `#[repr(transparent)]` wrapper around `NonNull<T::Pointee>`
+        unsafe { mem::transmute(slice) }
+    }
     pub(crate) fn deref(self) -> &'a T::Target
     where
         T: WrapDeref,

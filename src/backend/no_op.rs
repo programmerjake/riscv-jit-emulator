@@ -36,6 +36,8 @@ pub struct ContextRef<'compiler, 'ctx>(&'ctx Context<'compiler>);
 impl<'compiler, 'ctx> backend::ContextRef for ContextRef<'compiler, 'ctx> {
     type Type = TypeRef<'compiler, 'ctx>;
 
+    type ScalarType = TypeRef<'compiler, 'ctx>;
+
     type BoolType = TypeRef<'compiler, 'ctx>;
 
     fn bool_type(self) -> Self::BoolType {
@@ -87,6 +89,34 @@ impl<'compiler, 'ctx> backend::ContextRef for ContextRef<'compiler, 'ctx> {
     type ISizeType = TypeRef<'compiler, 'ctx>;
 
     fn isize_type(self) -> Self::ISizeType {
+        TypeRef(PhantomData)
+    }
+
+    type PtrType = TypeRef<'compiler, 'ctx>;
+
+    fn ptr_type(self, target: Self::Type) -> Self::PtrType {
+        TypeRef(PhantomData)
+    }
+
+    type StructType = TypeRef<'compiler, 'ctx>;
+
+    fn struct_type(self, fields: &[Self::Type]) -> Self::StructType {
+        TypeRef(PhantomData)
+    }
+
+    type ArrayType = TypeRef<'compiler, 'ctx>;
+
+    fn array_type(self, element: Self::Type, length: usize) -> Self::ArrayType {
+        TypeRef(PhantomData)
+    }
+
+    type FnPtrType = TypeRef<'compiler, 'ctx>;
+
+    fn fn_ptr_type(
+        self,
+        arguments: &[Self::Type],
+        return_type: Option<Self::Type>,
+    ) -> Self::FnPtrType {
         TypeRef(PhantomData)
     }
 

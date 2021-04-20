@@ -5,6 +5,7 @@ use crate::backend::{self, BackendError};
 use alloc::{vec, vec::Vec};
 use core::{
     cell::RefCell,
+    convert::TryInto,
     fmt,
     marker::PhantomData,
     mem::{self, ManuallyDrop},
@@ -64,7 +65,15 @@ unsafe impl Sync for CompiledCode {}
 impl backend::CompiledCode for CompiledCode {}
 
 #[derive(Debug, Copy, Clone)]
+#[repr(transparent)]
 pub struct TypeRef<'compiler, 'ctx>(Ref<'ctx, wrappers::LlvmType<'compiler>>);
+
+impl<'compiler, 'ctx> TypeRef<'compiler, 'ctx> {
+    fn as_slice_of_refs<'a>(slice: &'a [Self]) -> &'a [Ref<'ctx, wrappers::LlvmType<'compiler>>] {
+        // Safety: `TypeRef` is a `#[repr(transparent)]` wrapper around `Ref<'ctx, wrappers::LlvmType<'compiler>>`
+        unsafe { mem::transmute(slice) }
+    }
+}
 
 impl<'compiler, 'ctx> backend::TypeRef for TypeRef<'compiler, 'ctx> {}
 
@@ -102,6 +111,8 @@ pub struct ContextRef<'compiler, 'ctx> {
 
 impl<'compiler: 'ctx, 'ctx> backend::ContextRef for ContextRef<'compiler, 'ctx> {
     type Type = TypeRef<'compiler, 'ctx>;
+
+    type ScalarType = TypeRef<'compiler, 'ctx>;
 
     type BoolType = TypeRef<'compiler, 'ctx>;
 
@@ -193,6 +204,77 @@ impl<'compiler: 'ctx, 'ctx> backend::ContextRef for ContextRef<'compiler, 'ctx> 
                     self.target_data.as_raw_ptr(),
                 ),
             ))
+        }
+    }
+
+    type PtrType = TypeRef<'compiler, 'ctx>;
+
+    fn ptr_type(self, target: Self::Type) -> Self::PtrType {
+        unsafe {
+            TypeRef(Ref::from_raw_ptr(llvm_sys::core::LLVMPointerType(
+                target.0.as_raw_ptr(),
+                0,
+            )))
+        }
+    }
+
+    type StructType = TypeRef<'compiler, 'ctx>;
+
+    fn struct_type(self, fields: &[Self::Type]) -> Self::StructType {
+        let fields: &[llvm_sys::prelude::LLVMTypeRef] =
+            Ref::as_slice_of_raw_ptrs(TypeRef::as_slice_of_refs(fields));
+        let length = fields.len().try_into().expect("too many fields in struct");
+        unsafe {
+            TypeRef(Ref::from_raw_ptr(llvm_sys::core::LLVMStructTypeInContext(
+                self.context.as_raw_ptr(),
+                // uses non-const pointer, but doesn't modify passed-in slice
+                fields.as_ptr() as *mut llvm_sys::prelude::LLVMTypeRef,
+                length,
+                false as _,
+            )))
+        }
+    }
+
+    type ArrayType = TypeRef<'compiler, 'ctx>;
+
+    fn array_type(self, element: Self::Type, length: usize) -> Self::ArrayType {
+        let length = length.try_into().expect("array length too big");
+        unsafe {
+            TypeRef(Ref::from_raw_ptr(llvm_sys::core::LLVMArrayType(
+                element.0.as_raw_ptr(),
+                length,
+            )))
+        }
+    }
+
+    type FnPtrType = TypeRef<'compiler, 'ctx>;
+
+    fn fn_ptr_type(
+        self,
+        arguments: &[Self::Type],
+        return_type: Option<Self::Type>,
+    ) -> Self::FnPtrType {
+        let arguments: &[llvm_sys::prelude::LLVMTypeRef] =
+            Ref::as_slice_of_raw_ptrs(TypeRef::as_slice_of_refs(arguments));
+        let length = arguments
+            .len()
+            .try_into()
+            .expect("too many function arguments");
+        unsafe {
+            let return_type = match return_type {
+                Some(v) => v.0.as_raw_ptr(),
+                None => llvm_sys::core::LLVMVoidTypeInContext(self.context.as_raw_ptr()),
+            };
+            TypeRef(Ref::from_raw_ptr(llvm_sys::core::LLVMPointerType(
+                llvm_sys::core::LLVMFunctionType(
+                    return_type,
+                    // uses non-const pointer, but doesn't modify passed-in slice
+                    arguments.as_ptr() as *mut llvm_sys::prelude::LLVMTypeRef,
+                    length,
+                    false as _,
+                ),
+                0,
+            )))
         }
     }
 

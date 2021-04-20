@@ -4,6 +4,8 @@
 use alloc::{boxed::Box, string::ToString};
 use core::fmt;
 
+pub mod types;
+
 pub trait CompiledCode: fmt::Debug + 'static + Send + Sync {}
 
 pub trait TypeRef: fmt::Debug + Copy {}
@@ -36,12 +38,18 @@ pub trait Module: fmt::Debug {
 
 macro_rules! impl_context_types {
     (
-        $(fn $type_fn:ident() -> Self::$type:ident;)*
+        $(#[scalar] fn $scalar_type_fn:ident($($scalar_args:tt)*) -> Self::$scalar_type:ident;)*
+        $(fn $type_fn:ident($($args:tt)*) -> Self::$type:ident;)*
     ) => {
-        type Type: TypeRef $(+ From<Self::$type>)*;
+        type Type: TypeRef $(+ From<Self::$scalar_type>)* $(+ From<Self::$type>)* + From<Self::ScalarType>;
+        type ScalarType: TypeRef $(+ From<Self::$scalar_type>)*;
+        $(
+            type $scalar_type: TypeRef;
+            fn $scalar_type_fn($($scalar_args)*) -> Self::$scalar_type;
+        )*
         $(
             type $type: TypeRef;
-            fn $type_fn(self) -> Self::$type;
+            fn $type_fn($($args)*) -> Self::$type;
         )*
     };
 }
@@ -50,15 +58,32 @@ pub trait ContextRef: fmt::Debug + Copy {
     type Module: Module<ContextRef = Self>;
     fn create_module(self, name: &str) -> Self::Module;
     impl_context_types! {
-        fn bool_type() -> Self::BoolType;
-        fn f32_type() -> Self::F32Type;
-        fn f64_type() -> Self::F64Type;
-        fn i8_type() -> Self::I8Type;
-        fn i16_type() -> Self::I16Type;
-        fn i32_type() -> Self::I32Type;
-        fn i64_type() -> Self::I64Type;
-        fn i128_type() -> Self::I128Type;
-        fn isize_type() -> Self::ISizeType;
+        #[scalar]
+        fn bool_type(self) -> Self::BoolType;
+        #[scalar]
+        fn f32_type(self) -> Self::F32Type;
+        #[scalar]
+        fn f64_type(self) -> Self::F64Type;
+        #[scalar]
+        fn i8_type(self) -> Self::I8Type;
+        #[scalar]
+        fn i16_type(self) -> Self::I16Type;
+        #[scalar]
+        fn i32_type(self) -> Self::I32Type;
+        #[scalar]
+        fn i64_type(self) -> Self::I64Type;
+        #[scalar]
+        fn i128_type(self) -> Self::I128Type;
+        #[scalar]
+        fn isize_type(self) -> Self::ISizeType;
+        #[scalar]
+        fn ptr_type(self, target: Self::Type) -> Self::PtrType;
+        fn struct_type(self, fields: &[Self::Type]) -> Self::StructType;
+        fn array_type(self, element: Self::Type, length: usize) -> Self::ArrayType;
+        fn fn_ptr_type(self, arguments: &[Self::Type], return_type: Option<Self::Type>) -> Self::FnPtrType;
+    }
+    fn type_for<T: types::TypeFor>(self) -> Self::Type {
+        T::type_for(self)
     }
 }
 
@@ -218,7 +243,7 @@ mod tests {
 
             fn call_with_context<ContextT: ContextRef>(
                 self,
-                context: ContextT,
+                _context: ContextT,
             ) -> Result<Self::Output, Self::Error> {
                 Ok(())
             }
