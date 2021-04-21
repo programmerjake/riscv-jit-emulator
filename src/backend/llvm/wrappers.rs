@@ -386,6 +386,54 @@ impl fmt::Debug for Ref<'_, LlvmType<'_>> {
     }
 }
 
+pub(crate) struct LlvmValue<'compiler>(PhantomData<&'compiler ()>);
+
+unsafe impl<'compiler> Wrap for LlvmValue<'compiler> {
+    type Pointee = llvm_sys::LLVMValue;
+
+    type PhantomData = &'compiler ();
+}
+
+impl Ref<'_, LlvmValue<'_>> {
+    pub(crate) fn to_string(self) -> Own<LlvmString> {
+        unsafe { Own::from_raw_ptr(llvm_sys::core::LLVMPrintValueToString(self.as_raw_ptr())) }
+    }
+}
+
+impl fmt::Debug for Ref<'_, LlvmValue<'_>> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_tuple("LlvmValue")
+            .field(&DebugAsDisplay(self.to_string()))
+            .finish()
+    }
+}
+
+pub(crate) struct LlvmBasicBlock<'compiler>(PhantomData<&'compiler ()>);
+
+unsafe impl<'compiler> Wrap for LlvmBasicBlock<'compiler> {
+    type Pointee = llvm_sys::LLVMBasicBlock;
+
+    type PhantomData = &'compiler ();
+}
+
+impl Ref<'_, LlvmBasicBlock<'_>> {
+    pub(crate) fn to_string(self) -> Own<LlvmString> {
+        unsafe {
+            Own::from_raw_ptr(llvm_sys::core::LLVMPrintValueToString(
+                llvm_sys::core::LLVMBasicBlockAsValue(self.as_raw_ptr()),
+            ))
+        }
+    }
+}
+
+impl fmt::Debug for Ref<'_, LlvmBasicBlock<'_>> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_tuple("LlvmBasicBlock")
+            .field(&DebugAsDisplay(self.to_string()))
+            .finish()
+    }
+}
+
 pub(crate) struct LlvmModule<'compiler, 'ctx>(PhantomData<&'ctx &'compiler ()>);
 
 unsafe impl<'compiler, 'ctx> Wrap for LlvmModule<'compiler, 'ctx> {

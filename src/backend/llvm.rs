@@ -2,9 +2,9 @@
 // See Notices.txt for copyright information
 
 use crate::backend::{self, BackendError};
-use alloc::{vec, vec::Vec};
+use alloc::{boxed::Box, vec, vec::Vec};
 use core::{
-    cell::RefCell,
+    cell::Cell,
     convert::TryInto,
     fmt,
     marker::PhantomData,
@@ -14,6 +14,7 @@ use std::{
     ffi::{CStr, CString},
     sync::Mutex,
 };
+use typed_arena::Arena;
 
 mod wrappers;
 
@@ -77,39 +78,166 @@ impl<'compiler, 'ctx> TypeRef<'compiler, 'ctx> {
 
 impl<'compiler, 'ctx> backend::TypeRef for TypeRef<'compiler, 'ctx> {}
 
-#[derive(Debug)]
-pub struct Module<'compiler, 'ctx> {
-    module: Own<wrappers::LlvmModule<'compiler, 'ctx>>,
-    context: ContextRef<'compiler, 'ctx>,
+#[derive(Debug, Copy, Clone)]
+#[repr(transparent)]
+pub struct ValueRef<'compiler, 'ctx>(Ref<'ctx, wrappers::LlvmValue<'compiler>>);
+
+impl<'compiler, 'ctx> ValueRef<'compiler, 'ctx> {
+    fn as_slice_of_refs<'a>(slice: &'a [Self]) -> &'a [Ref<'ctx, wrappers::LlvmValue<'compiler>>] {
+        // Safety: `ValueRef` is a `#[repr(transparent)]` wrapper around `Ref<'ctx, wrappers::LlvmValue<'compiler>>`
+        unsafe { mem::transmute(slice) }
+    }
 }
 
-impl<'compiler, 'ctx> backend::Module for Module<'compiler, 'ctx> {
-    type ContextRef = ContextRef<'compiler, 'ctx>;
+impl<'compiler, 'ctx> backend::ValueRef for ValueRef<'compiler, 'ctx> {}
 
-    fn context(&self) -> Self::ContextRef {
+#[derive(Debug, Copy, Clone)]
+#[repr(transparent)]
+pub struct LabelRef<'compiler, 'ctx>(Ref<'ctx, wrappers::LlvmBasicBlock<'compiler>>);
+
+impl<'compiler, 'ctx> LabelRef<'compiler, 'ctx> {
+    fn as_slice_of_refs<'a>(
+        slice: &'a [Self],
+    ) -> &'a [Ref<'ctx, wrappers::LlvmBasicBlock<'compiler>>] {
+        // Safety: `LabelRef` is a `#[repr(transparent)]` wrapper around `Ref<'ctx, wrappers::LlvmBasicBlock<'compiler>>`
+        unsafe { mem::transmute(slice) }
+    }
+}
+
+impl<'compiler, 'ctx> backend::LabelRef for LabelRef<'compiler, 'ctx> {}
+
+#[derive(Debug)]
+pub struct BasicBlockBuilder<'compiler, 'ctx, 'modules> {
+    module: ModuleRef<'compiler, 'ctx, 'modules>,
+}
+
+impl<'compiler, 'ctx, 'modules> backend::BasicBlockBuilder
+    for BasicBlockBuilder<'compiler, 'ctx, 'modules>
+{
+    type Context = ContextRef<'compiler, 'ctx, 'modules>;
+
+    type Module = ModuleRef<'compiler, 'ctx, 'modules>;
+
+    type FunctionBuilder = FunctionBuilder<'compiler, 'ctx, 'modules>;
+
+    type Value = ValueRef<'compiler, 'ctx>;
+
+    type FnPtr = ValueRef<'compiler, 'ctx>;
+
+    type Label = LabelRef<'compiler, 'ctx>;
+
+    fn module(&self) -> Self::Module {
+        todo!()
+    }
+
+    fn fn_ptr(&self) -> Self::FnPtr {
+        todo!()
+    }
+
+    fn label(&self) -> Self::Label {
+        todo!()
+    }
+}
+
+#[derive(Debug)]
+pub struct FunctionBuilder<'compiler, 'ctx, 'modules> {
+    module: ModuleRef<'compiler, 'ctx, 'modules>,
+}
+
+impl<'compiler, 'ctx, 'modules> backend::FunctionBuilder
+    for FunctionBuilder<'compiler, 'ctx, 'modules>
+{
+    type Context = ContextRef<'compiler, 'ctx, 'modules>;
+
+    type Module = ModuleRef<'compiler, 'ctx, 'modules>;
+
+    type Value = ValueRef<'compiler, 'ctx>;
+
+    type FnPtr = ValueRef<'compiler, 'ctx>;
+
+    type Label = LabelRef<'compiler, 'ctx>;
+
+    type BasicBlockBuilder = BasicBlockBuilder<'compiler, 'ctx, 'modules>;
+
+    fn module(&self) -> Self::Module {
+        todo!()
+    }
+
+    fn fn_ptr(&self) -> Self::FnPtr {
+        todo!()
+    }
+
+    fn arguments(&self) -> &[Self::Value] {
+        todo!()
+    }
+
+    fn add_block(&self) -> Self::BasicBlockBuilder {
+        todo!()
+    }
+}
+
+#[derive(Debug, Copy, Clone)]
+pub struct ModuleRef<'compiler, 'ctx, 'modules> {
+    module: Ref<'modules, wrappers::LlvmModule<'compiler, 'ctx>>,
+    submitted: &'modules Cell<bool>,
+    context: ContextRef<'compiler, 'ctx, 'modules>,
+}
+
+impl<'compiler, 'ctx, 'modules> backend::ModuleRef for ModuleRef<'compiler, 'ctx, 'modules> {
+    type Context = ContextRef<'compiler, 'ctx, 'modules>;
+
+    fn context(self) -> Self::Context {
         self.context
     }
 
     fn submit_for_compilation(self) {
-        unsafe {
-            self.context
-                .submitted_modules
-                .borrow_mut()
-                .push(self.module.transmute_lifetimes())
-        }
+        self.submitted.set(true);
+    }
+
+    type Value = ValueRef<'compiler, 'ctx>;
+
+    type FnPtr = ValueRef<'compiler, 'ctx>;
+
+    type FunctionBuilder = FunctionBuilder<'compiler, 'ctx, 'modules>;
+
+    type FnPtrType = TypeRef<'compiler, 'ctx>;
+
+    fn add_function_definition(
+        self,
+        name: &str,
+        fn_ptr_type: Self::FnPtrType,
+        abi: backend::FunctionABI,
+    ) -> backend::FunctionAndEntry<Self::FunctionBuilder> {
+        todo!()
+    }
+
+    fn add_function_declaration(
+        self,
+        name: &str,
+        fn_ptr_type: Self::FnPtrType,
+        abi: backend::FunctionABI,
+    ) -> Self::FnPtr {
+        todo!()
     }
 }
 
-#[derive(Debug, Clone, Copy)]
-pub struct ContextRef<'compiler, 'ctx> {
-    context: Ref<'ctx, wrappers::LlvmContext<'compiler>>,
-    compiler: &'compiler Compiler,
-    target_data: Ref<'ctx, wrappers::LlvmTargetData>,
-    submitted_modules: &'ctx RefCell<Vec<Own<wrappers::LlvmModule<'static, 'static>>>>,
-    _phantom: PhantomData<&'ctx mut ()>,
+#[derive(Debug)]
+struct ModuleState<'compiler, 'ctx> {
+    submitted: Cell<bool>,
+    module: Own<wrappers::LlvmModule<'compiler, 'ctx>>,
 }
 
-impl<'compiler: 'ctx, 'ctx> backend::ContextRef for ContextRef<'compiler, 'ctx> {
+#[derive(Debug, Clone, Copy)]
+pub struct ContextRef<'compiler, 'ctx, 'modules> {
+    context: Ref<'ctx, wrappers::LlvmContext<'compiler>>,
+    context_with_modules: &'modules ContextWithModules<'compiler, 'ctx>,
+    target_data: Ref<'ctx, wrappers::LlvmTargetData>,
+    _phantom: PhantomData<&'modules mut ()>,
+}
+
+impl<'compiler: 'ctx, 'ctx, 'modules> backend::ContextRef
+    for ContextRef<'compiler, 'ctx, 'modules>
+{
     type Type = TypeRef<'compiler, 'ctx>;
 
     type ScalarType = TypeRef<'compiler, 'ctx>;
@@ -278,18 +406,22 @@ impl<'compiler: 'ctx, 'ctx> backend::ContextRef for ContextRef<'compiler, 'ctx> 
         }
     }
 
-    type Module = Module<'compiler, 'ctx>;
+    type Module = ModuleRef<'compiler, 'ctx, 'modules>;
 
-    fn create_module(self, name: &str) -> Self::Module {
+    fn add_module(self, name: &str) -> Self::Module {
         let name = CString::new(name).unwrap();
-        let module = wrappers::LlvmModule::new(self.context, name);
-        module.as_ref().set_data_layout(&self.compiler.target_data);
-        module
-            .as_ref()
-            .set_target_triple(&self.compiler.target_triple);
-        Module {
+        let module = self.context_with_modules.modules.alloc(ModuleState {
+            module: wrappers::LlvmModule::new(self.context, name),
+            submitted: Cell::new(false),
+        });
+        let submitted = &module.submitted;
+        let module = module.module.as_ref();
+        module.set_data_layout(&self.context_with_modules.compiler.target_data);
+        module.set_target_triple(&self.context_with_modules.compiler.target_triple);
+        ModuleRef {
             module,
             context: self,
+            submitted,
         }
     }
 }
@@ -297,67 +429,77 @@ impl<'compiler: 'ctx, 'ctx> backend::ContextRef for ContextRef<'compiler, 'ctx> 
 #[derive(Copy, Clone, Debug)]
 pub struct CompilerRef<'compiler>(&'compiler Compiler);
 
-struct ContextWithoutDrop<'compiler> {
-    context: Own<wrappers::LlvmContext<'compiler>>,
+struct Context<'compiler> {
+    context: Ref<'static, wrappers::LlvmContext<'compiler>>,
     compiler: &'compiler Compiler,
     target_data: Own<wrappers::LlvmTargetData>,
-    // must be dropped before `context`
-    submitted_modules: RefCell<Vec<Own<wrappers::LlvmModule<'static, 'static>>>>,
 }
 
-#[repr(transparent)]
-struct Context<'compiler>(ContextWithoutDrop<'compiler>);
+struct ContextWithModules<'compiler, 'ctx> {
+    context: Ref<'ctx, wrappers::LlvmContext<'compiler>>,
+    compiler: &'compiler Compiler,
+    target_data: Ref<'ctx, wrappers::LlvmTargetData>,
+    modules: Arena<ModuleState<'compiler, 'ctx>>,
+}
 
-impl<'compiler> Context<'compiler> {
-    fn new(compiler_ref: CompilerRef<'compiler>) -> Self {
-        Self(ContextWithoutDrop {
-            context: wrappers::LlvmContext::new(),
-            compiler: compiler_ref.0,
-            target_data: wrappers::LlvmTargetData::new(&compiler_ref.0.target_data),
-            submitted_modules: Default::default(),
-        })
+impl fmt::Debug for ContextWithModules<'_, '_> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "ContextWithModules {{ ... }}")
     }
-    fn as_ref<'ctx>(&'ctx self) -> ContextRef<'compiler, 'ctx> {
+}
+
+impl<'compiler, 'ctx> ContextWithModules<'compiler, 'ctx> {
+    fn as_context_ref<'modules>(&'modules self) -> ContextRef<'compiler, 'ctx, 'modules> {
         ContextRef {
-            context: self.0.context.as_ref(),
-            compiler: self.0.compiler,
-            target_data: self.0.target_data.as_ref(),
-            submitted_modules: &self.0.submitted_modules,
+            context: self.context,
+            context_with_modules: self,
+            target_data: self.target_data,
             _phantom: PhantomData,
         }
     }
-    unsafe fn into_context_without_drop(self) -> ContextWithoutDrop<'compiler> {
-        unsafe { mem::transmute(self) }
-    }
 }
 
-impl Drop for Context<'_> {
-    fn drop(&mut self) {
-        self.0.submitted_modules.take();
+impl<'compiler> Context<'compiler> {
+    /// `context` must outlive `Self`
+    unsafe fn new(
+        compiler_ref: CompilerRef<'compiler>,
+        context: Ref<'_, wrappers::LlvmContext<'compiler>>,
+    ) -> Self {
+        Self {
+            context: unsafe { context.transmute_lifetimes() },
+            compiler: compiler_ref.0,
+            target_data: wrappers::LlvmTargetData::new(&compiler_ref.0.target_data),
+        }
+    }
+    fn with_modules<'ctx>(&'ctx self) -> ContextWithModules<'compiler, 'ctx> {
+        ContextWithModules {
+            context: self.context,
+            compiler: self.compiler,
+            target_data: self.target_data.as_ref(),
+            modules: Arena::new(),
+        }
     }
 }
 
 impl<'compiler> backend::CompilerRef for CompilerRef<'compiler> {
     fn with_context<F: backend::CallWithContext>(self, f: F) -> Result<F::Output, F::Error> {
-        let context = Context::new(self);
-        let retval = f.call_with_context(context.as_ref())?;
-        if context.0.submitted_modules.borrow().is_empty() {
-            return Ok(retval);
-        }
+        let mut llvm_context = Some(wrappers::LlvmContext::new());
+        let context = unsafe { Context::new(self, llvm_context.as_ref().unwrap().as_ref()) };
+        let context_with_modules = context.with_modules();
+        let retval = f.call_with_context(context_with_modules.as_context_ref())?;
+        let modules = context_with_modules.modules.into_vec();
         unsafe {
-            let ContextWithoutDrop {
-                context,
-                compiler,
-                target_data: _,
-                submitted_modules,
-            } = context.into_context_without_drop();
-            compiler.execution_engine.add_context(context);
-            for submitted_module in submitted_modules.into_inner() {
-                compiler
-                    .execution_engine
-                    .execution_engine
-                    .as_ref()
-                    .add_module(submitted_module.transmute_lifetimes());
+            for module in modules {
+                if module.submitted.get() {
+                    if let Some(llvm_context) = llvm_context.take() {
+                        self.0.execution_engine.add_context(llvm_context);
+                    }
+                    self.0
+                        .execution_engine
+                        .execution_engine
+                        .as_ref()
+                        .add_module(module.module);
+                }
             }
         }
         Ok(retval)

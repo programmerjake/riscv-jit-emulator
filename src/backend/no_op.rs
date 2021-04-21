@@ -2,6 +2,7 @@
 // See Notices.txt for copyright information
 
 use crate::backend;
+use alloc::{vec, vec::Vec};
 use core::marker::PhantomData;
 
 #[derive(Debug)]
@@ -109,42 +110,180 @@ impl<'compiler, 'ctx> backend::ContextRef for ContextRef<'compiler, 'ctx> {
         TypeRef(PhantomData)
     }
 
-    type FnPtrType = TypeRef<'compiler, 'ctx>;
+    type FnPtrType = FnPtrTypeRef<'compiler, 'ctx>;
 
     fn fn_ptr_type(
         self,
-        _arguments: &[Self::Type],
+        arguments: &[Self::Type],
         _return_type: Option<Self::Type>,
     ) -> Self::FnPtrType {
-        TypeRef(PhantomData)
+        FnPtrTypeRef {
+            ty: TypeRef(PhantomData),
+            argument_count: arguments.len(),
+        }
     }
 
-    type Module = Module<'compiler, 'ctx>;
+    type Module = ModuleRef<'compiler, 'ctx>;
 
-    fn create_module(self, _name: &str) -> Self::Module {
-        Module { context: self }
+    fn add_module(self, _name: &str) -> Self::Module {
+        ModuleRef { context: self }
     }
 }
 
 #[derive(Debug)]
-pub struct Module<'compiler, 'ctx> {
+pub struct BasicBlockBuilder<'compiler, 'ctx> {
+    fn_ptr: ValueRef<'compiler, 'ctx>,
+    label: LabelRef<'compiler, 'ctx>,
+    module: ModuleRef<'compiler, 'ctx>,
+}
+
+impl<'compiler, 'ctx> backend::BasicBlockBuilder for BasicBlockBuilder<'compiler, 'ctx> {
+    type Context = ContextRef<'compiler, 'ctx>;
+
+    type Module = ModuleRef<'compiler, 'ctx>;
+
+    type Value = ValueRef<'compiler, 'ctx>;
+
+    type FnPtr = ValueRef<'compiler, 'ctx>;
+
+    type Label = LabelRef<'compiler, 'ctx>;
+
+    fn module(&self) -> Self::Module {
+        self.module
+    }
+
+    fn fn_ptr(&self) -> Self::FnPtr {
+        self.fn_ptr
+    }
+
+    fn label(&self) -> Self::Label {
+        self.label
+    }
+
+    type FunctionBuilder = FunctionBuilder<'compiler, 'ctx>;
+}
+
+#[derive(Debug)]
+pub struct FunctionBuilder<'compiler, 'ctx> {
+    fn_ptr: ValueRef<'compiler, 'ctx>,
+    arguments: Vec<ValueRef<'compiler, 'ctx>>,
+    module: ModuleRef<'compiler, 'ctx>,
+}
+
+impl<'compiler, 'ctx> backend::FunctionBuilder for FunctionBuilder<'compiler, 'ctx> {
+    type Context = ContextRef<'compiler, 'ctx>;
+
+    type Module = ModuleRef<'compiler, 'ctx>;
+
+    type Value = ValueRef<'compiler, 'ctx>;
+
+    type FnPtr = ValueRef<'compiler, 'ctx>;
+
+    type Label = LabelRef<'compiler, 'ctx>;
+
+    type BasicBlockBuilder = BasicBlockBuilder<'compiler, 'ctx>;
+
+    fn module(&self) -> Self::Module {
+        self.module
+    }
+
+    fn fn_ptr(&self) -> Self::FnPtr {
+        self.fn_ptr
+    }
+
+    fn arguments(&self) -> &[Self::Value] {
+        &self.arguments
+    }
+
+    fn add_block(&self) -> Self::BasicBlockBuilder {
+        BasicBlockBuilder {
+            fn_ptr: self.fn_ptr,
+            label: LabelRef(PhantomData),
+            module: self.module,
+        }
+    }
+}
+
+#[derive(Debug, Copy, Clone)]
+pub struct ModuleRef<'compiler, 'ctx> {
     context: ContextRef<'compiler, 'ctx>,
 }
 
-impl<'compiler, 'ctx> backend::Module for Module<'compiler, 'ctx> {
-    type ContextRef = ContextRef<'compiler, 'ctx>;
+impl<'compiler, 'ctx> backend::ModuleRef for ModuleRef<'compiler, 'ctx> {
+    type Context = ContextRef<'compiler, 'ctx>;
 
-    fn context(&self) -> Self::ContextRef {
+    fn context(self) -> Self::Context {
         self.context
     }
 
     fn submit_for_compilation(self) {}
+
+    type Value = ValueRef<'compiler, 'ctx>;
+
+    type FnPtr = ValueRef<'compiler, 'ctx>;
+
+    type FunctionBuilder = FunctionBuilder<'compiler, 'ctx>;
+
+    type FnPtrType = FnPtrTypeRef<'compiler, 'ctx>;
+
+    fn add_function_definition(
+        self,
+        name: &str,
+        fn_ptr_type: Self::FnPtrType,
+        abi: backend::FunctionABI,
+    ) -> backend::FunctionAndEntry<Self::FunctionBuilder> {
+        let fn_ptr = ValueRef(PhantomData);
+        let function = FunctionBuilder {
+            fn_ptr,
+            module: self,
+            arguments: vec![ValueRef(PhantomData); fn_ptr_type.argument_count],
+        };
+        let entry = BasicBlockBuilder {
+            fn_ptr,
+            label: LabelRef(PhantomData),
+            module: self,
+        };
+        backend::FunctionAndEntry { function, entry }
+    }
+
+    fn add_function_declaration(
+        self,
+        name: &str,
+        fn_ptr_type: Self::FnPtrType,
+        abi: backend::FunctionABI,
+    ) -> Self::FnPtr {
+        ValueRef(PhantomData)
+    }
 }
 
 #[derive(Debug, Copy, Clone)]
 pub struct TypeRef<'compiler, 'ctx>(PhantomData<ContextRef<'compiler, 'ctx>>);
 
 impl backend::TypeRef for TypeRef<'_, '_> {}
+
+#[derive(Debug, Copy, Clone)]
+pub struct FnPtrTypeRef<'compiler, 'ctx> {
+    ty: TypeRef<'compiler, 'ctx>,
+    argument_count: usize,
+}
+
+impl backend::TypeRef for FnPtrTypeRef<'_, '_> {}
+
+impl<'compiler, 'ctx> From<FnPtrTypeRef<'compiler, 'ctx>> for TypeRef<'compiler, 'ctx> {
+    fn from(v: FnPtrTypeRef<'compiler, 'ctx>) -> Self {
+        v.ty
+    }
+}
+
+#[derive(Debug, Copy, Clone)]
+pub struct ValueRef<'compiler, 'ctx>(PhantomData<ContextRef<'compiler, 'ctx>>);
+
+impl backend::ValueRef for ValueRef<'_, '_> {}
+
+#[derive(Debug, Copy, Clone)]
+pub struct LabelRef<'compiler, 'ctx>(PhantomData<ContextRef<'compiler, 'ctx>>);
+
+impl backend::LabelRef for LabelRef<'_, '_> {}
 
 #[derive(Clone, Debug)]
 pub struct BackendImpl;

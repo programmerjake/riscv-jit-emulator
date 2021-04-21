@@ -12,6 +12,8 @@ pub trait TypeRef: fmt::Debug + Copy {}
 
 pub trait ValueRef: fmt::Debug + Copy {}
 
+pub trait LabelRef: fmt::Debug + Copy {}
+
 pub trait BackendError: fmt::Display + fmt::Debug + 'static + Send + Sync + Sized {
     fn from_message<T: ToString>(message: T) -> Self;
     #[cfg(any(test, feature = "std"))]
@@ -30,9 +32,109 @@ impl BackendError for std::io::Error {
     }
 }
 
-pub trait Module: fmt::Debug {
-    type ContextRef: ContextRef;
-    fn context(&self) -> Self::ContextRef;
+pub trait BasicBlockBuilder: fmt::Debug {
+    type Context: ContextRef;
+    type Module: ModuleRef<
+        Context = Self::Context,
+        Value = Self::Value,
+        FnPtr = Self::FnPtr,
+        FunctionBuilder = Self::FunctionBuilder,
+    >;
+    type FunctionBuilder: FunctionBuilder<
+        Context = Self::Context,
+        Module = Self::Module,
+        Value = Self::Value,
+        FnPtr = Self::FnPtr,
+        Label = Self::Label,
+        BasicBlockBuilder = Self,
+    >;
+    type Value: ValueRef + From<Self::FnPtr>;
+    type FnPtr: ValueRef;
+    type Label: LabelRef;
+    #[must_use]
+    fn context(&self) -> Self::Context {
+        self.module().context()
+    }
+    #[must_use]
+    fn module(&self) -> Self::Module;
+    #[must_use]
+    fn fn_ptr(&self) -> Self::FnPtr;
+    #[must_use]
+    fn label(&self) -> Self::Label;
+}
+
+pub trait FunctionBuilder: fmt::Debug {
+    type Context: ContextRef;
+    type Module: ModuleRef<
+        Context = Self::Context,
+        Value = Self::Value,
+        FnPtr = Self::FnPtr,
+        FunctionBuilder = Self,
+    >;
+    type Value: ValueRef + From<Self::FnPtr>;
+    type FnPtr: ValueRef;
+    type Label: LabelRef;
+    type BasicBlockBuilder: BasicBlockBuilder<
+        Context = Self::Context,
+        Module = Self::Module,
+        FunctionBuilder = Self,
+        Value = Self::Value,
+        FnPtr = Self::FnPtr,
+        Label = Self::Label,
+    >;
+    #[must_use]
+    fn context(&self) -> Self::Context {
+        self.module().context()
+    }
+    #[must_use]
+    fn module(&self) -> Self::Module;
+    #[must_use]
+    fn fn_ptr(&self) -> Self::FnPtr;
+    #[must_use]
+    fn arguments(&self) -> &[Self::Value];
+    #[must_use]
+    fn add_block(&self) -> Self::BasicBlockBuilder;
+}
+
+#[must_use]
+#[derive(Debug)]
+pub struct FunctionAndEntry<F: FunctionBuilder> {
+    pub function: F,
+    pub entry: F::BasicBlockBuilder,
+}
+
+#[derive(Copy, Clone, PartialEq, Eq, Hash, Debug)]
+pub enum FunctionABI {
+    C,
+    Fast,
+    Tail,
+}
+
+pub trait ModuleRef: fmt::Debug + Copy {
+    type Context: ContextRef<Module = Self, FnPtrType = Self::FnPtrType>;
+    type Value: ValueRef + From<Self::FnPtr>;
+    type FnPtr: ValueRef;
+    type FunctionBuilder: FunctionBuilder<
+        Context = Self::Context,
+        Value = Self::Value,
+        FnPtr = Self::FnPtr,
+        Module = Self,
+    >;
+    type FnPtrType: TypeRef;
+    #[must_use]
+    fn context(self) -> Self::Context;
+    fn add_function_definition(
+        self,
+        name: &str,
+        fn_ptr_type: Self::FnPtrType,
+        abi: FunctionABI,
+    ) -> FunctionAndEntry<Self::FunctionBuilder>;
+    fn add_function_declaration(
+        self,
+        name: &str,
+        fn_ptr_type: Self::FnPtrType,
+        abi: FunctionABI,
+    ) -> Self::FnPtr;
     fn submit_for_compilation(self);
 }
 
@@ -55,8 +157,9 @@ macro_rules! impl_context_types {
 }
 
 pub trait ContextRef: fmt::Debug + Copy {
-    type Module: Module<ContextRef = Self>;
-    fn create_module(self, name: &str) -> Self::Module;
+    type Module: ModuleRef<Context = Self, FnPtrType = Self::FnPtrType>;
+    #[must_use]
+    fn add_module(self, name: &str) -> Self::Module;
     impl_context_types! {
         #[scalar]
         fn bool_type(self) -> Self::BoolType;
@@ -82,6 +185,7 @@ pub trait ContextRef: fmt::Debug + Copy {
         fn array_type(self, element: Self::Type, length: usize) -> Self::ArrayType;
         fn fn_ptr_type(self, arguments: &[Self::Type], return_type: Option<Self::Type>) -> Self::FnPtrType;
     }
+    #[must_use]
     fn type_for<T: types::TypeFor>(self) -> Self::Type {
         T::type_for(self)
     }
