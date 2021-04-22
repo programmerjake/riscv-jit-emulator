@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: LGPL-2.1-or-later
 // See Notices.txt for copyright information
-use super::ContextRef;
+use super::{ContextRef, FunctionABI};
 use core::{
     cell::{Cell, UnsafeCell},
     marker::PhantomData,
@@ -337,14 +337,14 @@ macro_rules! impl_fn_type_for {
     ($($arg_name:ident: $arg_ty:ident),*) => {
         unsafe impl<$($arg_ty: TypeFor),*> TypeFor for unsafe extern "C" fn($($arg_ty),*) {
             fn type_for<C: ContextRef>(context: C) -> C::Type {
-                context.fn_ptr_type(&[$(context.type_for::<$arg_ty>()),*], None).into()
+                context.fn_ptr_type(&[$(context.type_for::<$arg_ty>()),*], None, FunctionABI::C).into()
             }
             const LAYOUT_SUMMARY: TypeLayoutSummary = <usize as TypeFor>::LAYOUT_SUMMARY;
         }
 
         unsafe impl<Ret: TypeFor$(, $arg_ty: TypeFor)*> TypeFor for unsafe extern "C" fn($($arg_ty),*) -> Ret {
             fn type_for<C: ContextRef>(context: C) -> C::Type {
-                context.fn_ptr_type(&[$(context.type_for::<$arg_ty>()),*], Some(context.type_for::<Ret>())).into()
+                context.fn_ptr_type(&[$(context.type_for::<$arg_ty>()),*], Some(context.type_for::<Ret>()), FunctionABI::C).into()
             }
             const LAYOUT_SUMMARY: TypeLayoutSummary = <usize as TypeFor>::LAYOUT_SUMMARY;
         }

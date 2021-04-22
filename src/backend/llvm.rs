@@ -2,14 +2,16 @@
 // See Notices.txt for copyright information
 
 use crate::backend::{self, BackendError};
-use alloc::{boxed::Box, vec, vec::Vec};
+use alloc::{rc::Rc, vec, vec::Vec};
 use core::{
-    cell::Cell,
+    cell::{Cell, RefCell},
     convert::TryInto,
     fmt,
     marker::PhantomData,
     mem::{self, ManuallyDrop},
+    ptr,
 };
+use hashbrown::HashMap;
 use std::{
     ffi::{CStr, CString},
     sync::Mutex,
@@ -79,6 +81,25 @@ impl<'compiler, 'ctx> TypeRef<'compiler, 'ctx> {
 impl<'compiler, 'ctx> backend::TypeRef for TypeRef<'compiler, 'ctx> {}
 
 #[derive(Debug, Copy, Clone)]
+pub struct FnPtrTypeRef<'compiler, 'ctx> {
+    pointee: Ref<'ctx, wrappers::LlvmType<'compiler>>,
+    abi: backend::FunctionABI,
+}
+
+impl<'compiler, 'ctx> backend::TypeRef for FnPtrTypeRef<'compiler, 'ctx> {}
+
+impl<'compiler, 'ctx> From<FnPtrTypeRef<'compiler, 'ctx>> for TypeRef<'compiler, 'ctx> {
+    fn from(v: FnPtrTypeRef<'compiler, 'ctx>) -> Self {
+        unsafe {
+            TypeRef(Ref::from_raw_ptr(llvm_sys::core::LLVMPointerType(
+                v.pointee.as_raw_ptr(),
+                0,
+            )))
+        }
+    }
+}
+
+#[derive(Debug, Copy, Clone)]
 #[repr(transparent)]
 pub struct ValueRef<'compiler, 'ctx>(Ref<'ctx, wrappers::LlvmValue<'compiler>>);
 
@@ -106,9 +127,50 @@ impl<'compiler, 'ctx> LabelRef<'compiler, 'ctx> {
 
 impl<'compiler, 'ctx> backend::LabelRef for LabelRef<'compiler, 'ctx> {}
 
+#[derive(Clone, Default)]
+struct BuilderCache<'compiler, 'ctx>(Rc<Cell<Option<Own<wrappers::LlvmBuilder<'compiler, 'ctx>>>>>);
+
+impl fmt::Debug for BuilderCache<'_, '_> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "BuilderCache {{ ... }}")
+    }
+}
+
+#[derive(Debug)]
+struct BuilderAndCache<'compiler, 'ctx> {
+    builder: ManuallyDrop<Own<wrappers::LlvmBuilder<'compiler, 'ctx>>>,
+    builder_cache: BuilderCache<'compiler, 'ctx>,
+}
+
+impl<'compiler, 'ctx> BuilderAndCache<'compiler, 'ctx> {
+    fn new(
+        context: Ref<'ctx, wrappers::LlvmContext<'compiler>>,
+        builder_cache: BuilderCache<'compiler, 'ctx>,
+    ) -> Self {
+        let builder = builder_cache
+            .0
+            .take()
+            .unwrap_or_else(|| wrappers::LlvmBuilder::new(context));
+        Self {
+            builder: ManuallyDrop::new(builder),
+            builder_cache,
+        }
+    }
+}
+
+impl Drop for BuilderAndCache<'_, '_> {
+    fn drop(&mut self) {
+        let builder = unsafe { ptr::read(&*self.builder) };
+        self.builder_cache.0.set(Some(builder));
+    }
+}
+
 #[derive(Debug)]
 pub struct BasicBlockBuilder<'compiler, 'ctx, 'modules> {
     module: ModuleRef<'compiler, 'ctx, 'modules>,
+    fn_ptr: ValueRef<'compiler, 'ctx>,
+    label: LabelRef<'compiler, 'ctx>,
+    builder: BuilderAndCache<'compiler, 'ctx>,
 }
 
 impl<'compiler, 'ctx, 'modules> backend::BasicBlockBuilder
@@ -127,14 +189,27 @@ impl<'compiler, 'ctx, 'modules> backend::BasicBlockBuilder
     type Label = LabelRef<'compiler, 'ctx>;
 
     fn module(&self) -> Self::Module {
-        todo!()
+        self.module
     }
 
     fn fn_ptr(&self) -> Self::FnPtr {
-        todo!()
+        self.fn_ptr
     }
 
     fn label(&self) -> Self::Label {
+        self.label
+    }
+
+    fn build_tail_call(
+        self,
+        fn_ptr: Self::FnPtr,
+        fn_ptr_type: <Self::Module as backend::ModuleRef>::FnPtrType,
+        arguments: &[Self::Value],
+    ) {
+        todo!()
+    }
+
+    fn build_ret(self, retval: Option<Self::Value>) {
         todo!()
     }
 }
@@ -142,6 +217,9 @@ impl<'compiler, 'ctx, 'modules> backend::BasicBlockBuilder
 #[derive(Debug)]
 pub struct FunctionBuilder<'compiler, 'ctx, 'modules> {
     module: ModuleRef<'compiler, 'ctx, 'modules>,
+    fn_ptr: ValueRef<'compiler, 'ctx>,
+    arguments: Vec<ValueRef<'compiler, 'ctx>>,
+    builder_cache: BuilderCache<'compiler, 'ctx>,
 }
 
 impl<'compiler, 'ctx, 'modules> backend::FunctionBuilder
@@ -160,19 +238,39 @@ impl<'compiler, 'ctx, 'modules> backend::FunctionBuilder
     type BasicBlockBuilder = BasicBlockBuilder<'compiler, 'ctx, 'modules>;
 
     fn module(&self) -> Self::Module {
-        todo!()
+        self.module
     }
 
     fn fn_ptr(&self) -> Self::FnPtr {
-        todo!()
+        self.fn_ptr
     }
 
     fn arguments(&self) -> &[Self::Value] {
-        todo!()
+        &self.arguments
     }
 
-    fn add_block(&self) -> Self::BasicBlockBuilder {
-        todo!()
+    fn add_block(&mut self, block_name: &str) -> Self::BasicBlockBuilder {
+        let block_name = CString::new(block_name).unwrap();
+        let builder = BuilderAndCache::new(self.module.context.context, self.builder_cache.clone());
+        unsafe {
+            let label = LabelRef(Ref::from_raw_ptr(
+                llvm_sys::core::LLVMAppendBasicBlockInContext(
+                    self.module.context.context.as_raw_ptr(),
+                    self.fn_ptr.0.as_raw_ptr(),
+                    block_name.as_ptr(),
+                ),
+            ));
+            llvm_sys::core::LLVMPositionBuilderAtEnd(
+                builder.builder.as_raw_ptr(),
+                label.0.as_raw_ptr(),
+            );
+            BasicBlockBuilder {
+                module: self.module,
+                fn_ptr: self.fn_ptr,
+                label,
+                builder,
+            }
+        }
     }
 }
 
@@ -183,6 +281,13 @@ pub struct ModuleRef<'compiler, 'ctx, 'modules> {
     context: ContextRef<'compiler, 'ctx, 'modules>,
 }
 
+fn get_llvm_call_conv(abi: backend::FunctionABI) -> llvm_sys::LLVMCallConv {
+    match abi {
+        backend::FunctionABI::C => llvm_sys::LLVMCallConv::LLVMCCallConv,
+        backend::FunctionABI::Fast => llvm_sys::LLVMCallConv::LLVMFastCallConv,
+    }
+}
+
 impl<'compiler, 'ctx, 'modules> backend::ModuleRef for ModuleRef<'compiler, 'ctx, 'modules> {
     type Context = ContextRef<'compiler, 'ctx, 'modules>;
 
@@ -190,7 +295,7 @@ impl<'compiler, 'ctx, 'modules> backend::ModuleRef for ModuleRef<'compiler, 'ctx
         self.context
     }
 
-    fn submit_for_compilation(self) {
+    unsafe fn submit_for_compilation(self) {
         self.submitted.set(true);
     }
 
@@ -200,24 +305,59 @@ impl<'compiler, 'ctx, 'modules> backend::ModuleRef for ModuleRef<'compiler, 'ctx
 
     type FunctionBuilder = FunctionBuilder<'compiler, 'ctx, 'modules>;
 
-    type FnPtrType = TypeRef<'compiler, 'ctx>;
+    type FnPtrType = FnPtrTypeRef<'compiler, 'ctx>;
 
     fn add_function_definition(
         self,
         name: &str,
         fn_ptr_type: Self::FnPtrType,
-        abi: backend::FunctionABI,
+        entry_block_name: &str,
     ) -> backend::FunctionAndEntry<Self::FunctionBuilder> {
-        todo!()
+        let name = CString::new(name).unwrap();
+        unsafe {
+            let fn_ptr = ValueRef(Ref::from_raw_ptr(llvm_sys::core::LLVMAddFunction(
+                self.module.as_raw_ptr(),
+                name.as_ptr(),
+                fn_ptr_type.pointee.as_raw_ptr(),
+            )));
+            llvm_sys::core::LLVMSetFunctionCallConv(
+                fn_ptr.0.as_raw_ptr(),
+                get_llvm_call_conv(fn_ptr_type.abi) as _,
+            );
+            let builder_cache = BuilderCache::default();
+            let argument_count = llvm_sys::core::LLVMCountParams(fn_ptr.0.as_raw_ptr());
+            let mut arguments = Vec::with_capacity(argument_count.try_into().unwrap());
+            for i in 0..argument_count {
+                arguments.push(ValueRef(Ref::from_raw_ptr(llvm_sys::core::LLVMGetParam(
+                    fn_ptr.0.as_raw_ptr(),
+                    i,
+                ))));
+            }
+            let mut function = FunctionBuilder {
+                module: self,
+                fn_ptr,
+                arguments,
+                builder_cache,
+            };
+            let entry = backend::FunctionBuilder::add_block(&mut function, entry_block_name);
+            backend::FunctionAndEntry { function, entry }
+        }
     }
 
-    fn add_function_declaration(
-        self,
-        name: &str,
-        fn_ptr_type: Self::FnPtrType,
-        abi: backend::FunctionABI,
-    ) -> Self::FnPtr {
-        todo!()
+    fn add_function_declaration(self, name: &str, fn_ptr_type: Self::FnPtrType) -> Self::FnPtr {
+        let name = CString::new(name).unwrap();
+        unsafe {
+            let fn_ptr = ValueRef(Ref::from_raw_ptr(llvm_sys::core::LLVMAddFunction(
+                self.module.as_raw_ptr(),
+                name.as_ptr(),
+                fn_ptr_type.pointee.as_raw_ptr(),
+            )));
+            llvm_sys::core::LLVMSetFunctionCallConv(
+                fn_ptr.0.as_raw_ptr(),
+                get_llvm_call_conv(fn_ptr_type.abi) as _,
+            );
+            fn_ptr
+        }
     }
 }
 
@@ -375,12 +515,13 @@ impl<'compiler: 'ctx, 'ctx, 'modules> backend::ContextRef
         }
     }
 
-    type FnPtrType = TypeRef<'compiler, 'ctx>;
+    type FnPtrType = FnPtrTypeRef<'compiler, 'ctx>;
 
     fn fn_ptr_type(
         self,
         arguments: &[Self::Type],
         return_type: Option<Self::Type>,
+        abi: backend::FunctionABI,
     ) -> Self::FnPtrType {
         let arguments: &[llvm_sys::prelude::LLVMTypeRef] =
             Ref::as_slice_of_raw_ptrs(TypeRef::as_slice_of_refs(arguments));
@@ -393,16 +534,16 @@ impl<'compiler: 'ctx, 'ctx, 'modules> backend::ContextRef
                 Some(v) => v.0.as_raw_ptr(),
                 None => llvm_sys::core::LLVMVoidTypeInContext(self.context.as_raw_ptr()),
             };
-            TypeRef(Ref::from_raw_ptr(llvm_sys::core::LLVMPointerType(
-                llvm_sys::core::LLVMFunctionType(
+            FnPtrTypeRef {
+                pointee: Ref::from_raw_ptr(llvm_sys::core::LLVMFunctionType(
                     return_type,
                     // uses non-const pointer, but doesn't modify passed-in slice
                     arguments.as_ptr() as *mut llvm_sys::prelude::LLVMTypeRef,
                     length,
                     false as _,
-                ),
-                0,
-            )))
+                )),
+                abi,
+            }
         }
     }
 
@@ -435,11 +576,34 @@ struct Context<'compiler> {
     target_data: Own<wrappers::LlvmTargetData>,
 }
 
+#[derive(Copy, Clone, PartialEq, Eq, Hash, Debug)]
+struct TailCallInstructionCacheKey<'compiler, 'ctx> {
+    function_type: llvm_sys::prelude::LLVMTypeRef,
+    _phantom: PhantomData<FnPtrTypeRef<'compiler, 'ctx>>,
+}
+
+#[derive(Copy, Clone, Debug)]
+struct TailCallInstructionCacheValue<'compiler, 'ctx> {
+    template_call_instruction: Ref<'ctx, wrappers::LlvmValue<'compiler>>,
+}
+
+/// cache for `musttail call` instructions
+#[derive(Default)]
+struct TailCallInstructionCache<'compiler, 'ctx> {
+    cache: RefCell<
+        HashMap<
+            TailCallInstructionCacheKey<'compiler, 'ctx>,
+            TailCallInstructionCacheValue<'compiler, 'ctx>,
+        >,
+    >,
+}
+
 struct ContextWithModules<'compiler, 'ctx> {
     context: Ref<'ctx, wrappers::LlvmContext<'compiler>>,
     compiler: &'compiler Compiler,
     target_data: Ref<'ctx, wrappers::LlvmTargetData>,
     modules: Arena<ModuleState<'compiler, 'ctx>>,
+    tail_call_instruction_cache: TailCallInstructionCache<'compiler, 'ctx>,
 }
 
 impl fmt::Debug for ContextWithModules<'_, '_> {
@@ -477,6 +641,7 @@ impl<'compiler> Context<'compiler> {
             compiler: self.compiler,
             target_data: self.target_data.as_ref(),
             modules: Arena::new(),
+            tail_call_instruction_cache: TailCallInstructionCache::default(),
         }
     }
 }

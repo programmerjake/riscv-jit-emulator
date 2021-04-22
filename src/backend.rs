@@ -61,6 +61,13 @@ pub trait BasicBlockBuilder: fmt::Debug {
     fn fn_ptr(&self) -> Self::FnPtr;
     #[must_use]
     fn label(&self) -> Self::Label;
+    fn build_ret(self, retval: Option<Self::Value>);
+    fn build_tail_call(
+        self,
+        fn_ptr: Self::FnPtr,
+        fn_ptr_type: <Self::Module as ModuleRef>::FnPtrType,
+        arguments: &[Self::Value],
+    );
 }
 
 pub trait FunctionBuilder: fmt::Debug {
@@ -93,7 +100,7 @@ pub trait FunctionBuilder: fmt::Debug {
     #[must_use]
     fn arguments(&self) -> &[Self::Value];
     #[must_use]
-    fn add_block(&self) -> Self::BasicBlockBuilder;
+    fn add_block(&mut self, block_name: &str) -> Self::BasicBlockBuilder;
 }
 
 #[must_use]
@@ -107,7 +114,6 @@ pub struct FunctionAndEntry<F: FunctionBuilder> {
 pub enum FunctionABI {
     C,
     Fast,
-    Tail,
 }
 
 pub trait ModuleRef: fmt::Debug + Copy {
@@ -127,15 +133,11 @@ pub trait ModuleRef: fmt::Debug + Copy {
         self,
         name: &str,
         fn_ptr_type: Self::FnPtrType,
-        abi: FunctionABI,
+        entry_block_name: &str,
     ) -> FunctionAndEntry<Self::FunctionBuilder>;
-    fn add_function_declaration(
-        self,
-        name: &str,
-        fn_ptr_type: Self::FnPtrType,
-        abi: FunctionABI,
-    ) -> Self::FnPtr;
-    fn submit_for_compilation(self);
+    fn add_function_declaration(self, name: &str, fn_ptr_type: Self::FnPtrType) -> Self::FnPtr;
+    /// Safety: this module must meet all the code validity requirements
+    unsafe fn submit_for_compilation(self);
 }
 
 macro_rules! impl_context_types {
@@ -183,7 +185,7 @@ pub trait ContextRef: fmt::Debug + Copy {
         fn ptr_type(self, target: Self::Type) -> Self::PtrType;
         fn struct_type(self, fields: &[Self::Type]) -> Self::StructType;
         fn array_type(self, element: Self::Type, length: usize) -> Self::ArrayType;
-        fn fn_ptr_type(self, arguments: &[Self::Type], return_type: Option<Self::Type>) -> Self::FnPtrType;
+        fn fn_ptr_type(self, arguments: &[Self::Type], return_type: Option<Self::Type>, abi: FunctionABI) -> Self::FnPtrType;
     }
     #[must_use]
     fn type_for<T: types::TypeFor>(self) -> Self::Type {

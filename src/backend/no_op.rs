@@ -116,6 +116,7 @@ impl<'compiler, 'ctx> backend::ContextRef for ContextRef<'compiler, 'ctx> {
         self,
         arguments: &[Self::Type],
         _return_type: Option<Self::Type>,
+        _abi: backend::FunctionABI,
     ) -> Self::FnPtrType {
         FnPtrTypeRef {
             ty: TypeRef(PhantomData),
@@ -161,6 +162,16 @@ impl<'compiler, 'ctx> backend::BasicBlockBuilder for BasicBlockBuilder<'compiler
     }
 
     type FunctionBuilder = FunctionBuilder<'compiler, 'ctx>;
+
+    fn build_tail_call(
+        self,
+        fn_ptr: Self::FnPtr,
+        fn_ptr_type: <Self::Module as backend::ModuleRef>::FnPtrType,
+        arguments: &[Self::Value],
+    ) {
+    }
+
+    fn build_ret(self, retval: Option<Self::Value>) {}
 }
 
 #[derive(Debug)]
@@ -195,7 +206,7 @@ impl<'compiler, 'ctx> backend::FunctionBuilder for FunctionBuilder<'compiler, 'c
         &self.arguments
     }
 
-    fn add_block(&self) -> Self::BasicBlockBuilder {
+    fn add_block(&mut self, block_name: &str) -> Self::BasicBlockBuilder {
         BasicBlockBuilder {
             fn_ptr: self.fn_ptr,
             label: LabelRef(PhantomData),
@@ -216,7 +227,7 @@ impl<'compiler, 'ctx> backend::ModuleRef for ModuleRef<'compiler, 'ctx> {
         self.context
     }
 
-    fn submit_for_compilation(self) {}
+    unsafe fn submit_for_compilation(self) {}
 
     type Value = ValueRef<'compiler, 'ctx>;
 
@@ -230,7 +241,7 @@ impl<'compiler, 'ctx> backend::ModuleRef for ModuleRef<'compiler, 'ctx> {
         self,
         name: &str,
         fn_ptr_type: Self::FnPtrType,
-        abi: backend::FunctionABI,
+        entry_block_name: &str,
     ) -> backend::FunctionAndEntry<Self::FunctionBuilder> {
         let fn_ptr = ValueRef(PhantomData);
         let function = FunctionBuilder {
@@ -246,12 +257,7 @@ impl<'compiler, 'ctx> backend::ModuleRef for ModuleRef<'compiler, 'ctx> {
         backend::FunctionAndEntry { function, entry }
     }
 
-    fn add_function_declaration(
-        self,
-        name: &str,
-        fn_ptr_type: Self::FnPtrType,
-        abi: backend::FunctionABI,
-    ) -> Self::FnPtr {
+    fn add_function_declaration(self, name: &str, fn_ptr_type: Self::FnPtrType) -> Self::FnPtr {
         ValueRef(PhantomData)
     }
 }

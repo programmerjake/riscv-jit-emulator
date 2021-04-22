@@ -565,3 +565,33 @@ impl Ref<'_, LlvmTargetMachine> {
         }
     }
 }
+
+pub(crate) struct LlvmBuilder<'compiler, 'ctx>(PhantomData<&'ctx &'compiler ()>);
+
+unsafe impl<'compiler, 'ctx> Wrap for LlvmBuilder<'compiler, 'ctx> {
+    type Pointee = llvm_sys::LLVMBuilder;
+
+    type PhantomData = &'ctx &'compiler ();
+}
+
+impl WrapOwned for LlvmBuilder<'_, '_> {
+    unsafe fn do_drop(v: NonNull<Self::Pointee>) {
+        unsafe { llvm_sys::core::LLVMDisposeBuilder(v.as_ptr()) }
+    }
+}
+
+impl<'compiler, 'ctx> LlvmBuilder<'compiler, 'ctx> {
+    pub(crate) fn new(context: Ref<'ctx, LlvmContext<'compiler>>) -> Own<Self> {
+        unsafe {
+            Own::from_raw_ptr(llvm_sys::core::LLVMCreateBuilderInContext(
+                context.as_raw_ptr(),
+            ))
+        }
+    }
+}
+
+impl fmt::Debug for Ref<'_, LlvmBuilder<'_, '_>> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        self.as_raw_non_null().fmt(f)
+    }
+}
