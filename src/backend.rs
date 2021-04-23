@@ -275,6 +275,7 @@ impl Default for BackendEnum {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::{dbg, format};
 
     #[derive(Debug)]
     enum MyError {
@@ -357,6 +358,73 @@ mod tests {
 
         #[test]
         fn test_create_context() {
+            BackendEnum::default().call_with(MyFn);
+        }
+    }
+
+    mod test_simple_tail_call {
+        use super::*;
+
+        struct MyFn;
+
+        impl CallWithBackend for MyFn {
+            type Output = ();
+            fn call<T: Backend>(self, backend: &T) -> Self::Output {
+                match backend.with_compiler(OptimizationLevel::Debug, self) {
+                    Ok(_compiled_code) => {}
+                    result => panic!("unexpected result: {:?}", result),
+                }
+            }
+        }
+
+        impl CallWithCompiler for MyFn {
+            type Error = MyError;
+
+            fn call_with_compiler<CompilerT: CompilerRef>(
+                self,
+                compiler: CompilerT,
+            ) -> Result<(), Self::Error> {
+                compiler.with_context(self)
+            }
+        }
+
+        impl CallWithContext for MyFn {
+            type Output = ();
+            type Error = MyError;
+
+            fn call_with_context<ContextT: ContextRef>(
+                self,
+                context: ContextT,
+            ) -> Result<Self::Output, Self::Error> {
+                let module = context.add_module("test_mod");
+                for i in 0..=1 {
+                    let ret_type_is_some = i != 0;
+                    let fn_ptr_type = context.fn_ptr_type(
+                        &[context.i32_type().into()],
+                        ret_type_is_some.then(|| context.i32_type().into()),
+                        FunctionABI::Fast,
+                    );
+                    let FunctionAndEntry {
+                        function: f,
+                        entry: f_entry,
+                    } = module.add_function_definition(&format!("f{}", i), fn_ptr_type, "entry");
+                    f_entry.build_ret(ret_type_is_some.then(|| f.arguments()[0]));
+                    let FunctionAndEntry {
+                        function: _g,
+                        entry: g_entry,
+                    } = module.add_function_definition(&format!("g{}", i), fn_ptr_type, "entry");
+                    g_entry.build_tail_call(f.fn_ptr(), fn_ptr_type, f.arguments());
+                }
+                dbg!(&module);
+                unsafe {
+                    module.submit_for_compilation();
+                }
+                Ok(())
+            }
+        }
+
+        #[test]
+        fn test_simple_tail_call() {
             BackendEnum::default().call_with(MyFn);
         }
     }

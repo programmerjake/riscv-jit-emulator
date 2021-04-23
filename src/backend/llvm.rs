@@ -2,16 +2,16 @@
 // See Notices.txt for copyright information
 
 use crate::backend::{self, BackendError};
-use alloc::{rc::Rc, vec, vec::Vec};
+use alloc::{format, rc::Rc, string::String, vec, vec::Vec};
 use core::{
     cell::{Cell, RefCell},
     convert::TryInto,
-    fmt,
+    fmt::{self, Write},
     marker::PhantomData,
     mem::{self, ManuallyDrop},
     ptr,
 };
-use hashbrown::HashMap;
+use hashbrown::{hash_map::Entry, HashMap};
 use std::{
     ffi::{CStr, CString},
     sync::Mutex,
@@ -67,7 +67,7 @@ unsafe impl Sync for CompiledCode {}
 
 impl backend::CompiledCode for CompiledCode {}
 
-#[derive(Debug, Copy, Clone)]
+#[derive(Debug, Copy, Clone, PartialEq, Eq)]
 #[repr(transparent)]
 pub struct TypeRef<'compiler, 'ctx>(Ref<'ctx, wrappers::LlvmType<'compiler>>);
 
@@ -80,10 +80,31 @@ impl<'compiler, 'ctx> TypeRef<'compiler, 'ctx> {
 
 impl<'compiler, 'ctx> backend::TypeRef for TypeRef<'compiler, 'ctx> {}
 
-#[derive(Debug, Copy, Clone)]
+#[derive(Debug, Copy, Clone, PartialEq, Eq)]
 pub struct FnPtrTypeRef<'compiler, 'ctx> {
     pointee: Ref<'ctx, wrappers::LlvmType<'compiler>>,
+    return_type: Option<TypeRef<'compiler, 'ctx>>,
     abi: backend::FunctionABI,
+}
+
+impl<'compiler, 'ctx> FnPtrTypeRef<'compiler, 'ctx> {
+    fn argument_count(self) -> usize {
+        unsafe {
+            llvm_sys::core::LLVMCountParamTypes(self.pointee.as_raw_ptr())
+                .try_into()
+                .unwrap()
+        }
+    }
+    fn argument_types(self) -> Vec<TypeRef<'compiler, 'ctx>> {
+        let mut retval = vec![ptr::null_mut(); self.argument_count()];
+        unsafe {
+            llvm_sys::core::LLVMGetParamTypes(self.pointee.as_raw_ptr(), retval.as_mut_ptr());
+            retval
+                .into_iter()
+                .map(|v| TypeRef(Ref::from_raw_ptr(v)))
+                .collect()
+        }
+    }
 }
 
 impl<'compiler, 'ctx> backend::TypeRef for FnPtrTypeRef<'compiler, 'ctx> {}
@@ -107,6 +128,13 @@ impl<'compiler, 'ctx> ValueRef<'compiler, 'ctx> {
     fn as_slice_of_refs<'a>(slice: &'a [Self]) -> &'a [Ref<'ctx, wrappers::LlvmValue<'compiler>>] {
         // Safety: `ValueRef` is a `#[repr(transparent)]` wrapper around `Ref<'ctx, wrappers::LlvmValue<'compiler>>`
         unsafe { mem::transmute(slice) }
+    }
+    fn type_of(self) -> TypeRef<'compiler, 'ctx> {
+        unsafe {
+            TypeRef(Ref::<wrappers::LlvmType>::from_raw_ptr(
+                llvm_sys::core::LLVMTypeOf(self.0.as_raw_ptr()),
+            ))
+        }
     }
 }
 
@@ -169,6 +197,7 @@ impl Drop for BuilderAndCache<'_, '_> {
 pub struct BasicBlockBuilder<'compiler, 'ctx, 'modules> {
     module: ModuleRef<'compiler, 'ctx, 'modules>,
     fn_ptr: ValueRef<'compiler, 'ctx>,
+    fn_ptr_type: FnPtrTypeRef<'compiler, 'ctx>,
     label: LabelRef<'compiler, 'ctx>,
     builder: BuilderAndCache<'compiler, 'ctx>,
 }
@@ -206,11 +235,72 @@ impl<'compiler, 'ctx, 'modules> backend::BasicBlockBuilder
         fn_ptr_type: <Self::Module as backend::ModuleRef>::FnPtrType,
         arguments: &[Self::Value],
     ) {
-        todo!()
+        assert_eq!(fn_ptr.type_of(), TypeRef::from(fn_ptr_type));
+        assert_eq!(fn_ptr_type, self.fn_ptr_type);
+        let argument_types = fn_ptr_type.argument_types();
+        assert_eq!(arguments.len(), argument_types.len());
+        for (arg, expected_type) in arguments.iter().zip(&argument_types) {
+            assert_eq!(arg.type_of(), *expected_type);
+        }
+        let tail_call_template_instruction = self
+            .module
+            .context
+            .get_tail_call_template_instruction(fn_ptr_type);
+        unsafe {
+            let tail_call_instruction =
+                llvm_sys::core::LLVMInstructionClone(tail_call_template_instruction.as_raw_ptr());
+            let tail_call_instruction_operand_count: usize =
+                llvm_sys::core::LLVMGetNumOperands(tail_call_instruction)
+                    .try_into()
+                    .unwrap();
+            assert_eq!(arguments.len() + 1, tail_call_instruction_operand_count);
+            for (index, argument) in arguments.iter().enumerate() {
+                llvm_sys::core::LLVMSetOperand(
+                    tail_call_instruction,
+                    index as _,
+                    argument.0.as_raw_ptr(),
+                );
+            }
+            llvm_sys::core::LLVMSetOperand(
+                tail_call_instruction,
+                (tail_call_instruction_operand_count - 1) as _,
+                fn_ptr.0.as_raw_ptr(),
+            );
+            llvm_sys::core::LLVMInsertIntoBuilder(
+                self.builder.builder.as_raw_ptr(),
+                tail_call_instruction,
+            );
+            let tail_call_instruction =
+                Ref::<wrappers::LlvmValue>::from_raw_ptr(tail_call_instruction);
+            llvm_sys::core::LLVMSetInstructionCallConv(
+                tail_call_instruction.as_raw_ptr(),
+                get_llvm_call_conv(fn_ptr_type.abi) as _,
+            );
+            if fn_ptr_type.return_type.is_some() {
+                llvm_sys::core::LLVMBuildRet(
+                    self.builder.builder.as_raw_ptr(),
+                    tail_call_instruction.as_raw_ptr(),
+                );
+            } else {
+                llvm_sys::core::LLVMBuildRetVoid(self.builder.builder.as_raw_ptr());
+            }
+        }
     }
 
     fn build_ret(self, retval: Option<Self::Value>) {
-        todo!()
+        assert_eq!(self.fn_ptr_type.return_type, retval.map(ValueRef::type_of));
+        if let Some(retval) = retval {
+            unsafe {
+                llvm_sys::core::LLVMBuildRet(
+                    self.builder.builder.as_raw_ptr(),
+                    retval.0.as_raw_ptr(),
+                );
+            }
+        } else {
+            unsafe {
+                llvm_sys::core::LLVMBuildRetVoid(self.builder.builder.as_raw_ptr());
+            }
+        }
     }
 }
 
@@ -218,6 +308,7 @@ impl<'compiler, 'ctx, 'modules> backend::BasicBlockBuilder
 pub struct FunctionBuilder<'compiler, 'ctx, 'modules> {
     module: ModuleRef<'compiler, 'ctx, 'modules>,
     fn_ptr: ValueRef<'compiler, 'ctx>,
+    fn_ptr_type: FnPtrTypeRef<'compiler, 'ctx>,
     arguments: Vec<ValueRef<'compiler, 'ctx>>,
     builder_cache: BuilderCache<'compiler, 'ctx>,
 }
@@ -267,6 +358,7 @@ impl<'compiler, 'ctx, 'modules> backend::FunctionBuilder
             BasicBlockBuilder {
                 module: self.module,
                 fn_ptr: self.fn_ptr,
+                fn_ptr_type: self.fn_ptr_type,
                 label,
                 builder,
             }
@@ -336,6 +428,7 @@ impl<'compiler, 'ctx, 'modules> backend::ModuleRef for ModuleRef<'compiler, 'ctx
             let mut function = FunctionBuilder {
                 module: self,
                 fn_ptr,
+                fn_ptr_type,
                 arguments,
                 builder_cache,
             };
@@ -373,6 +466,190 @@ pub struct ContextRef<'compiler, 'ctx, 'modules> {
     context_with_modules: &'modules ContextWithModules<'compiler, 'ctx>,
     target_data: Ref<'ctx, wrappers::LlvmTargetData>,
     _phantom: PhantomData<&'modules mut ()>,
+}
+
+#[derive(Copy, Clone, PartialEq, Eq, Hash, Debug)]
+struct TailCallInstructionCacheKey<'compiler, 'ctx> {
+    function_type: llvm_sys::prelude::LLVMTypeRef,
+    _phantom: PhantomData<FnPtrTypeRef<'compiler, 'ctx>>,
+}
+
+#[derive(Copy, Clone, Debug)]
+struct TailCallInstructionCacheValue<'compiler, 'ctx> {
+    template_call_instruction: Ref<'ctx, wrappers::LlvmValue<'compiler>>,
+}
+
+/// cache for `musttail call` instructions
+#[derive(Default)]
+struct TailCallInstructionCache<'compiler, 'ctx> {
+    cache: RefCell<
+        HashMap<
+            TailCallInstructionCacheKey<'compiler, 'ctx>,
+            TailCallInstructionCacheValue<'compiler, 'ctx>,
+        >,
+    >,
+}
+
+fn get_words_and_rest<const N: usize>(text: &str) -> Option<([&str; N], &str)> {
+    let mut words = [""; N];
+    let mut rest = text.trim_start();
+    for i in &mut words {
+        let word_end = rest.find(|c: char| c.is_whitespace())?;
+        *i = &rest[..word_end];
+        rest = rest[word_end..].trim_start();
+    }
+    Some((words, rest))
+}
+
+fn is_percent_number(s: &str) -> bool {
+    if let Some(s) = s.strip_prefix('%') {
+        !s.is_empty() && !s.contains(|c: char| !c.is_ascii_digit())
+    } else {
+        false
+    }
+}
+
+fn convert_tail_to_musttail(text: &str) -> String {
+    let mut retval = String::new();
+    let mut tail_found = false;
+    for line in text.lines() {
+        match get_words_and_rest(line) {
+            Some((["tail", "call"], rest)) => {
+                writeln!(retval, "musttail call {}", rest).unwrap();
+                tail_found = true;
+                continue;
+            }
+            _ => {}
+        }
+        match get_words_and_rest(line) {
+            Some(([var, "=", "tail", "call"], rest)) if is_percent_number(var) => {
+                writeln!(
+                    retval,
+                    "{var} = musttail call {rest}",
+                    var = var,
+                    rest = rest
+                )
+                .unwrap();
+                tail_found = true;
+                continue;
+            }
+            _ => {}
+        }
+        writeln!(retval, "{}", line).unwrap();
+    }
+    assert!(
+        tail_found,
+        "could not find `tail call` to replace with `musttail call`: {:?}",
+        text
+    );
+    retval
+}
+
+impl<'compiler: 'ctx, 'ctx, 'modules> ContextRef<'compiler, 'ctx, 'modules> {
+    fn get_tail_call_template_instruction(
+        self,
+        fn_ptr_type: FnPtrTypeRef<'compiler, 'ctx>,
+    ) -> Ref<'ctx, wrappers::LlvmValue<'compiler>> {
+        let key = TailCallInstructionCacheKey {
+            function_type: fn_ptr_type.pointee.as_raw_ptr(),
+            _phantom: PhantomData,
+        };
+        let mut cache = self
+            .context_with_modules
+            .tail_call_instruction_cache
+            .cache
+            .borrow_mut();
+        let vacant_entry = match cache.entry(key) {
+            Entry::Occupied(entry) => return entry.get().template_call_instruction,
+            Entry::Vacant(entry) => entry,
+        };
+        let default_name = CString::new("name").unwrap();
+        let empty_name = <&CStr>::default();
+        unsafe {
+            let make_original_text = || {
+                let module = wrappers::LlvmModule::new(self.context, &empty_name);
+                let function =
+                    Ref::<wrappers::LlvmValue>::from_raw_ptr(llvm_sys::core::LLVMAddFunction(
+                        module.as_raw_ptr(),
+                        default_name.as_ptr(),
+                        fn_ptr_type.pointee.as_raw_ptr(),
+                    ));
+                let mut parameters = vec![ptr::null_mut(); fn_ptr_type.argument_count()];
+                llvm_sys::core::LLVMGetParams(function.as_raw_ptr(), parameters.as_mut_ptr());
+                let builder = wrappers::LlvmBuilder::new(self.context);
+                let label = LabelRef(Ref::from_raw_ptr(
+                    llvm_sys::core::LLVMAppendBasicBlockInContext(
+                        self.context.as_raw_ptr(),
+                        function.as_raw_ptr(),
+                        empty_name.as_ptr(),
+                    ),
+                ));
+                llvm_sys::core::LLVMPositionBuilderAtEnd(
+                    builder.as_raw_ptr(),
+                    label.0.as_raw_ptr(),
+                );
+                let call = llvm_sys::core::LLVMBuildCall(
+                    builder.as_raw_ptr(),
+                    function.as_raw_ptr(),
+                    parameters.as_mut_ptr(),
+                    parameters.len().try_into().unwrap(),
+                    empty_name.as_ptr(),
+                );
+                llvm_sys::core::LLVMSetTailCall(call, true as _);
+                if fn_ptr_type.return_type.is_some() {
+                    llvm_sys::core::LLVMBuildRet(builder.as_raw_ptr(), call);
+                } else {
+                    llvm_sys::core::LLVMBuildRetVoid(builder.as_raw_ptr());
+                }
+                module.as_ref().to_string()
+            };
+            let text = CString::new(convert_tail_to_musttail(
+                make_original_text().to_str().unwrap(),
+            ))
+            .unwrap();
+            let memory_buffer = wrappers::LlvmMemoryBuffer::with_memory_range(
+                text.as_bytes_with_nul(),
+                empty_name,
+                true,
+            );
+            let module = wrappers::LlvmModule::parse_ir(self.context, memory_buffer)
+                .map_err(|e| {
+                    panic!(
+                        "failed to parse module for tail call template:\n{}\n\nmodule:\n{}",
+                        e,
+                        text.to_str().unwrap(),
+                    );
+                })
+                .unwrap();
+            let module = self
+                .context_with_modules
+                .modules
+                .alloc(ModuleState {
+                    module,
+                    submitted: Cell::new(false),
+                })
+                .module
+                .as_ref();
+            let function = Ref::<wrappers::LlvmValue>::from_raw_ptr_opt(
+                llvm_sys::core::LLVMGetFirstFunction(module.as_raw_ptr()),
+            )
+            .unwrap();
+            let entry_basic_block = Ref::<wrappers::LlvmBasicBlock>::from_raw_ptr(
+                llvm_sys::core::LLVMGetEntryBasicBlock(function.as_raw_ptr()),
+            );
+            let template_call_instruction = Ref::<wrappers::LlvmValue>::from_raw_ptr(
+                llvm_sys::core::LLVMGetFirstInstruction(entry_basic_block.as_raw_ptr()),
+            );
+            assert_eq!(
+                llvm_sys::core::LLVMGetInstructionOpcode(template_call_instruction.as_raw_ptr()),
+                llvm_sys::LLVMOpcode::LLVMCall
+            );
+            vacant_entry.insert(TailCallInstructionCacheValue {
+                template_call_instruction,
+            });
+            template_call_instruction
+        }
+    }
 }
 
 impl<'compiler: 'ctx, 'ctx, 'modules> backend::ContextRef
@@ -530,18 +807,19 @@ impl<'compiler: 'ctx, 'ctx, 'modules> backend::ContextRef
             .try_into()
             .expect("too many function arguments");
         unsafe {
-            let return_type = match return_type {
+            let llvm_return_type = match return_type {
                 Some(v) => v.0.as_raw_ptr(),
                 None => llvm_sys::core::LLVMVoidTypeInContext(self.context.as_raw_ptr()),
             };
             FnPtrTypeRef {
                 pointee: Ref::from_raw_ptr(llvm_sys::core::LLVMFunctionType(
-                    return_type,
+                    llvm_return_type,
                     // uses non-const pointer, but doesn't modify passed-in slice
                     arguments.as_ptr() as *mut llvm_sys::prelude::LLVMTypeRef,
                     length,
                     false as _,
                 )),
+                return_type,
                 abi,
             }
         }
@@ -574,28 +852,6 @@ struct Context<'compiler> {
     context: Ref<'static, wrappers::LlvmContext<'compiler>>,
     compiler: &'compiler Compiler,
     target_data: Own<wrappers::LlvmTargetData>,
-}
-
-#[derive(Copy, Clone, PartialEq, Eq, Hash, Debug)]
-struct TailCallInstructionCacheKey<'compiler, 'ctx> {
-    function_type: llvm_sys::prelude::LLVMTypeRef,
-    _phantom: PhantomData<FnPtrTypeRef<'compiler, 'ctx>>,
-}
-
-#[derive(Copy, Clone, Debug)]
-struct TailCallInstructionCacheValue<'compiler, 'ctx> {
-    template_call_instruction: Ref<'ctx, wrappers::LlvmValue<'compiler>>,
-}
-
-/// cache for `musttail call` instructions
-#[derive(Default)]
-struct TailCallInstructionCache<'compiler, 'ctx> {
-    cache: RefCell<
-        HashMap<
-            TailCallInstructionCacheKey<'compiler, 'ctx>,
-            TailCallInstructionCacheValue<'compiler, 'ctx>,
-        >,
-    >,
 }
 
 struct ContextWithModules<'compiler, 'ctx> {

@@ -7,6 +7,7 @@ use core::{
     mem,
     ops::Deref,
     ptr::{self, NonNull},
+    slice,
 };
 use std::{
     ffi::CStr,
@@ -49,6 +50,10 @@ pub(crate) trait WrapClone: WrapOwned {
     fn do_clone(v: Ref<'_, Self>) -> Own<Self>;
 }
 
+pub(crate) trait WrapEq: Wrap {
+    fn eq(a: Ref<'_, Self>, b: Ref<'_, Self>) -> bool;
+}
+
 #[repr(transparent)]
 pub(crate) struct Own<T: WrapOwned>(NonNull<T::Pointee>, PhantomData<T::PhantomData>);
 
@@ -65,7 +70,10 @@ impl<T: WrapOwned> Own<T> {
         self.0
     }
     pub(crate) unsafe fn from_raw_ptr(value: *mut T::Pointee) -> Self {
-        unsafe { Self::from_raw_non_null(NonNull::new(value).unwrap()) }
+        unsafe { Self::from_raw_ptr_opt(value).unwrap() }
+    }
+    pub(crate) unsafe fn from_raw_ptr_opt(value: *mut T::Pointee) -> Option<Self> {
+        unsafe { NonNull::new(value).map(|v| Self::from_raw_non_null(v)) }
     }
     pub(crate) fn into_raw_ptr(self) -> *mut T::Pointee {
         self.into_raw_non_null().as_ptr()
@@ -126,6 +134,26 @@ impl<T: WrapClone> Clone for Own<T> {
     }
 }
 
+impl<T: WrapEq + WrapOwned> Eq for Own<T> {}
+
+impl<T: WrapEq + WrapOwned> PartialEq<Ref<'_, T>> for Own<T> {
+    fn eq(&self, other: &Ref<'_, T>) -> bool {
+        WrapEq::eq(self.as_ref(), *other)
+    }
+}
+
+impl<T: WrapEq + WrapOwned> PartialEq<Own<T>> for Ref<'_, T> {
+    fn eq(&self, other: &Own<T>) -> bool {
+        WrapEq::eq(*self, other.as_ref())
+    }
+}
+
+impl<T: WrapEq + WrapOwned> PartialEq for Own<T> {
+    fn eq(&self, other: &Own<T>) -> bool {
+        WrapEq::eq(self.as_ref(), other.as_ref())
+    }
+}
+
 #[repr(transparent)]
 pub(crate) struct Ref<'a, T: Wrap>(NonNull<T::Pointee>, PhantomData<(&'a (), T::PhantomData)>);
 
@@ -137,7 +165,10 @@ impl<'a, T: Wrap> Ref<'a, T> {
         self.0
     }
     pub(crate) unsafe fn from_raw_ptr(value: *mut T::Pointee) -> Self {
-        unsafe { Self::from_raw_non_null(NonNull::new(value).unwrap()) }
+        unsafe { Self::from_raw_ptr_opt(value).unwrap() }
+    }
+    pub(crate) unsafe fn from_raw_ptr_opt(value: *mut T::Pointee) -> Option<Self> {
+        unsafe { NonNull::new(value).map(|v| Self::from_raw_non_null(v)) }
     }
     pub(crate) fn as_raw_ptr(&self) -> *mut T::Pointee {
         self.as_raw_non_null().as_ptr()
@@ -163,6 +194,14 @@ impl<'a, T: Wrap> Ref<'a, T> {
         Other: Wrap<Pointee = T::Pointee> + WrapTransmuteLifetimes<T>,
     {
         Ref(self.0, PhantomData)
+    }
+}
+
+impl<T: WrapEq> Eq for Ref<'_, T> {}
+
+impl<T: WrapEq> PartialEq<Ref<'_, T>> for Ref<'_, T> {
+    fn eq(&self, other: &Ref<'_, T>) -> bool {
+        WrapEq::eq(*self, *other)
     }
 }
 
@@ -281,6 +320,12 @@ impl std::error::Error for Own<LlvmString> {}
 
 impl std::error::Error for Ref<'_, LlvmString> {}
 
+impl WrapEq for LlvmString {
+    fn eq(a: Ref<'_, Self>, b: Ref<'_, Self>) -> bool {
+        *a == *b
+    }
+}
+
 pub(crate) struct LlvmExecutionEngine;
 
 unsafe impl Wrap for LlvmExecutionEngine {
@@ -372,6 +417,12 @@ unsafe impl<'compiler> Wrap for LlvmType<'compiler> {
     type PhantomData = &'compiler ();
 }
 
+impl WrapEq for LlvmType<'_> {
+    fn eq(a: Ref<'_, Self>, b: Ref<'_, Self>) -> bool {
+        a.as_raw_non_null() == b.as_raw_non_null()
+    }
+}
+
 impl Ref<'_, LlvmType<'_>> {
     pub(crate) fn to_string(self) -> Own<LlvmString> {
         unsafe { Own::from_raw_ptr(llvm_sys::core::LLVMPrintTypeToString(self.as_raw_ptr())) }
@@ -454,6 +505,25 @@ impl<'compiler, 'ctx> LlvmModule<'compiler, 'ctx> {
                 name.as_ref().as_ptr(),
                 context.as_raw_ptr(),
             ))
+        }
+    }
+    pub(crate) fn parse_ir(
+        context: Ref<'ctx, LlvmContext<'compiler>>,
+        memory_buffer: Own<LlvmMemoryBuffer<'_>>,
+    ) -> Result<Own<LlvmModule<'compiler, 'ctx>>, Own<LlvmString>> {
+        let mut module = ptr::null_mut();
+        let mut error = ptr::null_mut();
+        unsafe {
+            if 0 == llvm_sys::ir_reader::LLVMParseIRInContext(
+                context.as_raw_ptr(),
+                memory_buffer.into_raw_ptr(),
+                &mut module,
+                &mut error,
+            ) {
+                Ok(Own::from_raw_ptr(module))
+            } else {
+                Err(Own::from_raw_ptr(error))
+            }
         }
     }
 }
@@ -593,5 +663,52 @@ impl<'compiler, 'ctx> LlvmBuilder<'compiler, 'ctx> {
 impl fmt::Debug for Ref<'_, LlvmBuilder<'_, '_>> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         self.as_raw_non_null().fmt(f)
+    }
+}
+
+pub(crate) struct LlvmMemoryBuffer<'data>(PhantomData<&'data [u8]>);
+
+unsafe impl<'data> Wrap for LlvmMemoryBuffer<'data> {
+    type Pointee = llvm_sys::LLVMMemoryBuffer;
+
+    type PhantomData = &'data [u8];
+}
+
+impl<'data> WrapOwned for LlvmMemoryBuffer<'data> {
+    unsafe fn do_drop(v: NonNull<Self::Pointee>) {
+        unsafe { llvm_sys::core::LLVMDisposeMemoryBuffer(v.as_ptr()) }
+    }
+}
+
+impl<'data> LlvmMemoryBuffer<'data> {
+    pub(crate) fn with_memory_range(
+        data: &'data [u8],
+        name: impl AsRef<CStr>,
+        requires_null_terminator: bool,
+    ) -> Own<Self> {
+        if requires_null_terminator {
+            assert_eq!(data.last(), Some(&b'\0'));
+        }
+        unsafe {
+            Own::from_raw_ptr(llvm_sys::core::LLVMCreateMemoryBufferWithMemoryRange(
+                data.as_ptr() as *const c_char,
+                data.len(),
+                name.as_ref().as_ptr(),
+                requires_null_terminator as _,
+            ))
+        }
+    }
+}
+
+impl<'data> WrapDeref for LlvmMemoryBuffer<'data> {
+    type Target = [u8];
+
+    fn deref<'a>(v: Ref<'a, Self>) -> &'a Self::Target {
+        unsafe {
+            slice::from_raw_parts(
+                llvm_sys::core::LLVMGetBufferStart(v.as_raw_ptr()) as *const u8,
+                llvm_sys::core::LLVMGetBufferSize(v.as_raw_ptr()),
+            )
+        }
     }
 }
