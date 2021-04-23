@@ -681,20 +681,26 @@ impl<'data> WrapOwned for LlvmMemoryBuffer<'data> {
 }
 
 impl<'data> LlvmMemoryBuffer<'data> {
-    pub(crate) fn with_memory_range(
-        data: &'data [u8],
-        name: impl AsRef<CStr>,
-        requires_null_terminator: bool,
-    ) -> Own<Self> {
-        if requires_null_terminator {
-            assert_eq!(data.last(), Some(&b'\0'));
-        }
+    pub(crate) fn with_memory_range(data: &'data [u8], name: impl AsRef<CStr>) -> Own<Self> {
         unsafe {
             Own::from_raw_ptr(llvm_sys::core::LLVMCreateMemoryBufferWithMemoryRange(
                 data.as_ptr() as *const c_char,
                 data.len(),
                 name.as_ref().as_ptr(),
-                requires_null_terminator as _,
+                false as _,
+            ))
+        }
+    }
+    pub(crate) fn with_memory_range_null_terminated(
+        data: &'data CStr,
+        name: impl AsRef<CStr>,
+    ) -> Own<Self> {
+        unsafe {
+            Own::from_raw_ptr(llvm_sys::core::LLVMCreateMemoryBufferWithMemoryRange(
+                data.as_ptr(),
+                data.to_bytes().len(),
+                name.as_ref().as_ptr(),
+                true as _,
             ))
         }
     }

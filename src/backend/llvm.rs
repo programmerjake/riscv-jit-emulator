@@ -607,11 +607,8 @@ impl<'compiler: 'ctx, 'ctx, 'modules> ContextRef<'compiler, 'ctx, 'modules> {
                 make_original_text().to_str().unwrap(),
             ))
             .unwrap();
-            let memory_buffer = wrappers::LlvmMemoryBuffer::with_memory_range(
-                text.as_bytes_with_nul(),
-                empty_name,
-                true,
-            );
+            let memory_buffer =
+                wrappers::LlvmMemoryBuffer::with_memory_range_null_terminated(&text, empty_name);
             let module = wrappers::LlvmModule::parse_ir(self.context, memory_buffer)
                 .map_err(|e| {
                     panic!(
