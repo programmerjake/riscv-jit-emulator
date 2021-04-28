@@ -507,7 +507,8 @@ impl<'compiler, 'ctx> LlvmModule<'compiler, 'ctx> {
             ))
         }
     }
-    pub(crate) fn parse_ir(
+    /// Safety: memory_buffer must be null-terminated
+    pub(crate) unsafe fn parse_ir(
         context: Ref<'ctx, LlvmContext<'compiler>>,
         memory_buffer: Own<LlvmMemoryBuffer<'_>>,
     ) -> Result<Own<LlvmModule<'compiler, 'ctx>>, Own<LlvmString>> {
